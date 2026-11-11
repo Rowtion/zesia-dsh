@@ -1,0 +1,80 @@
+.zesia-settings, .zesia-review, .zesia-review-entry, .zesia-request-error {
+  --background: var(--dsw-alias-bg-base);
+  --foreground: var(--dsw-alias-label-primary);
+  --surface: var(--dsw-alias-bg-base);
+  --surface-muted: var(--dsw-alias-bg-layer-1);
+  --text-secondary: var(--dsw-alias-label-secondary);
+  --text-muted: var(--dsw-alias-label-caption);
+  --border: var(--dsw-alias-border-l3);
+  --border-strong: var(--dsw-alias-border-l3);
+  --control-on: var(--dsw-alias-label-primary);
+  --control-glyph: var(--dsw-alias-bg-base);
+  --danger: var(--dsw-alias-label-error, var(--dsw-alias-label-primary));
+  --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px;
+  --text-sm: 13px; --text-xs: 12px; --leading-body: 1.5;
+  --radius-control: 8px; --control-height-sm: 32px; --control-height-md: 36px; --control-height-lg: 40px;
+  --shadow-resting: none;
+  --duration-instant: 80ms; --duration-fast: 120ms; --duration-standard: 180ms; --duration-spring: 220ms;
+  --ease-standard: ease; --ease-spring: ease;
+}
+.zesia-settings {
+  position: fixed; inset: 0; box-sizing: border-box; width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px); margin: auto; padding: 0; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 12px;
+  color: var(--foreground); background: var(--background); font: inherit; font-size: 14px; line-height: 1.5;
+  box-shadow: 0 16px 64px #0003;
+}
+.zesia-settings::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); }
+.zesia-settings-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 20px 0; }
+.zesia-settings-header h2 { font: inherit; font-size: 16px; font-weight: 600; margin: 0; }
+.zesia-settings-close { width: 32px; padding: 0; font-size: 20px; }
+.zesia-settings-body { padding: 20px; }
+.zesia-settings-destination { display: grid; gap: 6px; margin-top: 20px; font-size: 12px; color: var(--text-secondary); }
+.zesia-settings-destination span:last-child { overflow-wrap: anywhere; color: var(--text-muted); }
+.zesia-settings-note { color: var(--text-secondary); font-size: 12px; margin: 12px 0 0; }
+.zesia-settings-error { color: var(--danger); font-size: 13px; margin: 12px 0 0; }
+.zesia-settings-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--border); }
+
+.zesia-review { box-sizing: border-box; width: 100%; max-width: 800px; min-width: 0; border: 1px solid var(--border); border-radius: 12px; color: var(--foreground); background: var(--background); font: inherit; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.zesia-review-meta { color: var(--text-muted); font-size: 12px; margin: 8px 0 0; }
+.zesia-review summary { color: var(--text-secondary); cursor: pointer; font-size: 12px; }
+.zesia-review summary:focus-visible { outline: 2px solid var(--foreground); outline-offset: 4px; border-radius: 2px; }
+.zesia-review pre { margin: 0; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+
+.zesia-settings-embedded { position: static; width: min(100%, 560px); max-height: none; margin: 0; border: 0; box-shadow: none; }
+.zesia-settings-embedded .zesia-settings-header { padding: 0 0 20px; }
+.zesia-settings-embedded .zesia-settings-body { padding: 0 0 24px; }
+.zesia-settings-embedded .zesia-settings-footer { padding: 16px 0 0; }
+.zesia-settings-saved { margin-right: auto; align-self: center; font-size: 12px; color: var(--text-secondary); }
+.zesia-settings-menu { position: relative; }
+.zesia-settings-menu > summary { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; list-style: none; font-size: 18px; line-height: 1; }
+.zesia-settings-menu > summary::-webkit-details-marker { display: none; }
+.zesia-settings-menu > summary:hover { background: var(--surface-muted); }
+.zesia-settings-menu-panel { position: absolute; top: calc(100% + 4px); right: 0; z-index: 10; min-width: 130px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); box-shadow: 0 6px 20px #0002; }
+.zesia-settings-menu-panel button { justify-content: flex-start; width: 100%; padding: 8px 12px; border: 0; border-radius: 4px; text-align: left; font: inherit; font-size: 13px; color: var(--foreground); background: transparent; cursor: pointer; }
+.zesia-settings-menu-panel button:hover { background: var(--surface-muted); }
+
+/* Match native reply actions; style only plugin-owned elements. */
+.zesia-consult-entry { position: relative; display: flex; flex-shrink: 0; align-items: center; height: calc(28px + var(--dsh-content-font-delta, 0px)); gap: 8px; line-height: 0; }
+.zesia-toolbar-separator { display: block; flex-shrink: 0; align-self: center; width: 1px; height: 16px; margin: 0; background: var(--dsw-alias-border-l1, #8884); }
+.zesia-consult-button { transform: translateY(-2px); box-sizing: border-box; display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: calc(28px + var(--dsh-content-font-delta, 0px)); height: calc(28px + var(--dsh-content-font-delta, 0px)); padding: 0; margin: 0; border: 0; border-radius: var(--dsw-radius-sm, 4px); background: transparent; color: var(--dsw-alias-label-tertiary, #858a94); font: inherit; line-height: 0; cursor: pointer; }
+.zesia-consult-button svg { display: block; flex-shrink: 0; width: calc(17px + var(--dsh-content-font-delta, 0px)); height: calc(17px + var(--dsh-content-font-delta, 0px)); }
+.zesia-consult-button:hover { background: var(--dsw-alias-interactive-bg-hover, #8881); }
+.zesia-consult-button:focus-visible { outline: 2px solid #367cdb; outline-offset: 2px; }
+.zesia-consult-button:disabled { opacity: .5; cursor: wait; }
+
+.zesia-request-error { position: absolute; inset-block-start: calc(100% + 8px); inset-inline-start: 0; z-index: 40; box-sizing: border-box; width: min(320px, 80vw); padding: 12px; border: 1px solid var(--dsw-alias-border-l1, #8884); border-radius: 8px; background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #222); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; box-shadow: 0 4px 16px #0002; }
+.zesia-request-error p { margin: 6px 0; }
+
+/* DSH hides past reply action rows on mouseleave. Pin only rows with an open error,
+   including the pointer journey across the gap to the popup. No icon geometry changes. */
+[data-actions-reveal] .ZITbJG_actions:has(.zesia-request-error) { opacity: 1 !important; }
+.zesia-request-error { user-select: text; cursor: auto; }
+.zesia-request-error p { user-select: text; cursor: text; }
+.zesia-error-actions { display: flex; align-items: center; gap: 8px; }
+
+.zesia-request-error > strong { display: block; padding-inline-end: 52px; }
+.zesia-request-error .zesia-error-actions { position: absolute; inset-block-start: 6px; inset-inline-end: 6px; gap: 2px; }
+.zesia-request-error .zesia-error-icon { box-sizing: border-box; width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 4px; }
+.zesia-error-icon svg { display: block; flex-shrink: 0; }
+.zesia-copy-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

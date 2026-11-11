@@ -1,0 +1,25 @@
+import { build } from 'esbuild';
+import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = new URL('../', import.meta.url);
+process.chdir(fileURLToPath(root));
+await mkdir('lib/licenses', { recursive: true });
+await build({ entryPoints: ['src/index.mjs'], bundle: true, platform: 'node', format: 'esm', target: 'node22', loader: { '.md': 'text' }, outfile: 'lib/index.mjs', legalComments: 'eof' });
+const browser = await build({ entryPoints: ['src/client.mjs'], bundle: true, platform: 'browser', format: 'cjs', external: ['react'], loader: { '.svg': 'dataurl' }, outfile: 'lib/client.js', write: false, legalComments: 'eof' });
+const js = browser.outputFiles.find(file => file.path.endsWith('.js')).text;
+const css = browser.outputFiles.find(file => file.path.endsWith('.css')).text;
+await copyFile('src/ui/LICENSE', 'lib/licenses/UIARC-LICENSE');
+await writeFile('lib/client.js', `window.__ModuleLoader__.load({ id: '@zesia/dsh-plugin', factory: (require) => { const module = { exports: {} }; const exports = module.exports;\n${js}\nif (typeof document !== 'undefined') { let sheet = document.getElementById('zesia-settings-css'); if (!sheet) { sheet = document.createElement('style'); sheet.id = 'zesia-settings-css'; document.head.append(sheet); } sheet.textContent = ${JSON.stringify(css)}; }\nreturn module.exports; } });\n`);
+const req = createRequire(import.meta.url);
+const sdkDir = dirname(dirname(req.resolve('@a2a-js/sdk')));
+await copyFile(join(sdkDir, 'LICENSE'), 'lib/licenses/A2A-SDK-LICENSE');
+const sdkRequire = createRequire(join(sdkDir, 'package.json'));
+const joseDir = dirname(dirname(dirname(sdkRequire.resolve('jose'))));
+await copyFile(join(joseDir, 'LICENSE.md'), 'lib/licenses/JOSE-LICENSE.md');
+const zodDir = dirname(req.resolve('zod/package.json'));
+await copyFile(join(zodDir, 'LICENSE'), 'lib/licenses/ZOD-LICENSE');
+console.log('Built host tool and browser button.');
+
+await build({entryPoints:['scripts/configure-public.mjs'],outfile:'lib/configure.mjs',bundle:true,platform:'node',format:'esm',target:'node22'});
