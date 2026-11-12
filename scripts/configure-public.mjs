@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { stdin, stdout } from 'node:process';
-import { readSecret } from '@zesia/client/read-secret';
+import { readSecret } from '@zesia/runtime/read-secret';
 
 const defaultUrl = 'https://api.zesia.dev';
 const path = process.env.ZESIA_CONFIG || join(homedir(), '.config', 'zesia', 'dsh.json');

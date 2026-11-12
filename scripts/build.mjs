@@ -1,3 +1,5 @@
+import {installA2A} from '@zesia/runtime/install-a2a';
+await installA2A({root:process.cwd()});
 import { build } from 'esbuild';
 import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -23,3 +25,5 @@ await copyFile(join(zodDir, 'LICENSE'), 'lib/licenses/ZOD-LICENSE');
 console.log('Built host tool and browser button.');
 
 await build({entryPoints:['scripts/configure-public.mjs'],outfile:'lib/configure.mjs',bundle:true,platform:'node',format:'esm',target:'node22'});
+
+await build({entryPoints:['node_modules/@zesia/runtime/scripts/install-a2a.mjs'],outfile:'lib/install-a2a.mjs',bundle:true,platform:'node',format:'esm',target:'node22'});
