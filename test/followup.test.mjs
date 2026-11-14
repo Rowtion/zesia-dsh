@@ -9,7 +9,7 @@ const requests=[{id:'code',kind:'evidence',question:'Show commit ordering',whyNe
 function setup(automatic=false){
  let events=[{type:'user/message',seq:0,data:{id:'u1',source:{kind:'user'},content:[{type:'text',text:'Please inspect the service.'}]}},{type:'turn/start',data:{turn:1}}];
  const session={id:'test-followup',snapshotEvents:()=>events},calls=[];
- const workflow=createConsultWorkflow({readConfiguration:async()=>({url:'https://consult.example',token:'synthetic',confirmBeforeSend:!automatic}),preflightRequest:async()=>({ok:true}),requestConsult:async(args)=>{calls.push(args);return {consultId:'c'+calls.length,a2a:{contextId:'a2a-context'},decision:{status:calls.length<3?'needs_clarification':'advice',assessment:'Bounded assessment',recommendation:'Verify commit ordering'},followUp:{requests,round:calls.length,maxRounds:3},advice:'Useful bounded advice'};}});
+ const workflow=createConsultWorkflow({enableOnlineBridge:false,readConfiguration:async()=>({url:'https://consult.example',token:'synthetic',confirmBeforeSend:!automatic}),preflightRequest:async()=>({ok:true}),requestConsult:async(args)=>{calls.push(args);return {consultId:'c'+calls.length,a2a:{contextId:'a2a-context'},decision:{status:calls.length<3?'needs_clarification':'advice',assessment:'Bounded assessment',recommendation:'Verify commit ordering'},followUp:{requests,round:calls.length,maxRounds:3},advice:'Useful bounded advice'};}});
  const exec={agent:{session},signal:new AbortController().signal};
  return {workflow,exec,calls,user(text){events.push({type:'user/message',seq:events.length,data:{id:'u-choice',source:{kind:'user'},content:[{type:'text',text}]}},{type:'turn/start',data:{turn:events.length}});}};
 }

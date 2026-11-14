@@ -16,6 +16,7 @@ export function apply(ctx) {
   ctx.tools.register(workflow.followupTool);
   ctx.tools.register(workflow.contextTool);
   ctx.tools.register(workflow.resultTool);
+  ctx.tools.register(workflow.waitTool);
   ctx.commands.register({
     definitionId: 'zesia-consult-command', name: 'zesia',
     description: 'Ask zesia for an independent review of the current reply.',
