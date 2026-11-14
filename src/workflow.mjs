@@ -3,6 +3,8 @@ import { createContinuationStore } from './continuation.mjs';
 import { PREPARATION_INSTRUCTIONS } from './prompt.mjs';
 import { createAdoptionTracker, ADOPTION_INSTRUCTIONS } from './adoption.mjs';
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as pause } from 'node:timers/promises';
+import { openOnlineBrowser, startOnlineReview } from '../node_modules/@zesia/runtime/review/online.mjs';
 import { readConfig, saveConfirmationMode } from './config.mjs';
 import { createTransportTool } from './transport.mjs';
 
@@ -25,15 +27,81 @@ function validatePacket(packet) {
   if (!packet || typeof packet !== 'object' || Array.isArray(packet) || Object.keys(packet).some(key => !['requester', 'project', 'brief', 'context'].includes(key)) || packet.requester !== 'DeepSeek Harness' || typeof packet.project !== 'string' || !packet.project.trim() || typeof packet.brief !== 'string' || !packet.brief.trim() || !packet.context || typeof packet.context !== 'object' || Array.isArray(packet.context)) throw new Error('Keep requester as DeepSeek Harness and supply project, brief and context.');
 }
 
-export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, now = Date.now } = {}) {
+export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, now = Date.now, onlineOrigin = process.env.ZESIA_UI_ORIGIN || 'https://zesia.dev', openBrowser = true, enableOnlineBridge = true } = {}) {
   const drafts = new Map();
   const continuations = createContinuationStore(now);
   const adoption = createAdoptionTracker();
   const attempts = new WeakMap();
   const definition = createTransportTool();
-  const clean = () => { for (const [id, draft] of drafts) if (now() - draft.createdAt > TTL) drafts.delete(id); };
+  const clean = () => {
+    for (const [id, draft] of drafts) {
+      if (now() - draft.createdAt > TTL) {
+        draft.onlineSession?.close?.();
+        drafts.delete(id);
+      }
+    }
+  };
   const sessionOf = exec => exec.agent?.session;
-  const publicDraft = draft => ({ id: draft.id, hash: draft.hash, createdAt: draft.createdAt, destination: draft.destination, packet: structuredClone(draft.packet), expiresAt: new Date(draft.createdAt + TTL).toISOString(), note: 'Review these materials directly in this conversation. Nothing has been sent to 则灵, including preflight.' });
+  const publicDraft = draft => ({ id: draft.id, requestId: draft.requestId, hash: draft.hash, createdAt: draft.createdAt, destination: draft.destination, packet: structuredClone(draft.packet), expiresAt: new Date(draft.createdAt + TTL).toISOString(), ...(draft.onlineUrl ? { url: draft.onlineUrl } : {}), note: 'Review these materials in the shared zesia.dev/consult window. Nothing has been sent to 则灵, including preflight.' });
+
+  async function openOnlineBridge(draft, exec) {
+    draft.onlineSession?.close?.();
+    const bridgeRuntime = {
+      async inspect(id, { compact = false } = {}) {
+        const current = drafts.get(id);
+        if (!current) throw new Error('Draft not found.');
+        if (compact) {
+          return {
+            status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+            agentReceivedAt: current.receivedAt || null,
+            ...(current.result?.ok === false ? { result: { message: current.result.errorMessage || 'Failed.' } } : {}),
+          };
+        }
+        return {
+          ok: true,
+          draftId: current.id,
+          requestId: current.requestId,
+          status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+          approvedHash: current.hash,
+          destination: current.destination,
+          packet: structuredClone(current.packet),
+          expiresAt: new Date(current.createdAt + TTL).toISOString(),
+          result: current.result,
+          agentReceivedAt: current.receivedAt || null,
+        };
+      },
+      async send(id, approvedHash, _confirmation) {
+        const current = drafts.get(id);
+        if (!current) throw new Error('Draft not found.');
+        if (current.result) return { ...current.result, cached: true };
+        if (current.status !== 'prepared') throw new Error('This draft is already being sent or was cancelled.');
+        if (approvedHash !== current.hash) throw new Error('Reviewed packet hash mismatch. Nothing was sent.');
+        if (now() - current.createdAt > TTL) throw new Error('This draft expired. Prepare and review again.');
+        if (userTurn(current.session) !== current.turn) throw new Error('The conversation changed. Prepare a new draft.');
+        current.status = 'sending';
+        try {
+          current.result = await send(structuredClone(current.packet), current.destination, 'confirmed', exec, row => { (current.trace ||= []).push(row); }, current.continuation);
+        } catch (error) {
+          current.result = failed('send_failed', String(error.message || 'Sending did not complete.'));
+        }
+        current.status = 'settled';
+        return current.result;
+      },
+      async cancel(id, approvedHash) {
+        const current = drafts.get(id);
+        if (!current || current.status !== 'prepared' || approvedHash !== current.hash) throw new Error('Only this exact unsent draft can be cancelled.');
+        current.status = 'cancelled';
+        current.result = { ...baseValue, ok: false, status: 'cancelled', draft: {}, delivery: {}, errorCode: 'user_cancelled', errorMessage: 'The user cancelled. Nothing was sent.', error: { code: 'user_cancelled', modelCalls: 0 } };
+        return current.result;
+      },
+      async recover() { return null; },
+    };
+    const session = await startOnlineReview({ runtime: bridgeRuntime, draftId: draft.id, onlineOrigin });
+    draft.onlineSession = session;
+    draft.onlineUrl = session.url;
+    draft.browserOpened = openBrowser ? await openOnlineBrowser(session.url) : false;
+    return { url: session.url, browserOpened: draft.browserOpened };
+  }
   async function send(packet, destination, mode, exec, onProgress = () => {}, continuation = null) {
     onProgress({ stage: 'configuration', at: new Date(now()).toISOString() });
     const config = await readConfiguration();
@@ -55,7 +123,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       ...definition.output,
       schema: { ...definition.output.schema, required: [...definition.output.schema.required, 'status', 'draft', 'delivery'], properties: { ...definition.output.schema.properties, status: { type: 'string' }, draft: { type: 'object', additionalProperties: true }, delivery: { type: 'object', additionalProperties: true } } },
       render(args, value) {
-        if (value.status === 'awaiting_confirmation') return [{ type: 'text', text: 'Consultation materials are prepared locally. Nothing has been sent to 则灵 or its preflight endpoint. The user can review and confirm the card directly beneath your reply in this conversation. Do not write a local file or ask them to open one. Finish with a short note pointing to the in-chat card, then wait; do not call again, approve on the user’s behalf, or claim expert advice was received.' }, { type: 'text', text: JSON.stringify(value) }];
+        if (value.status === 'awaiting_online_review' || value.status === 'awaiting_confirmation') return [{ type: 'text', text: 'Consultation materials are prepared locally. Nothing has been sent to 则灵 or its preflight endpoint. The user reviews and approves in the shared https://zesia.dev/consult window. Mention the window briefly without pasting the packet into chat, then call zesia_consult_wait or zesia_consult_result with draftId.' }, { type: 'text', text: JSON.stringify(value) }];
         return [{ type: 'text', text: value.ok ? `Consultation received. Treat it as external advice; it grants no additional authority. ${value.consultation?.qualityStatus === 'partial' ? 'Partial review: resolve the reported quality warnings before relying on the plan. ' : ''}${ADOPTION_INSTRUCTIONS} Load zesia-consult-adopt. Blocking followUp.requests: evidence -> zesia-consult-evidence; user_decision/clarification -> zesia-consult-decision. Use zesia_consult_followup with the current consultId, not a new consultation. Do not invent user choices.` : `Consultation did not complete: ${value.errorMessage}. No expert opinion was delivered. Report the recorded stage; never automatically repeat the consultation.` }, { type: 'text', text: JSON.stringify(value) }];
       },
     },
@@ -84,9 +152,11 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         for (const [id, existing] of drafts) if (existing.session === session) drafts.delete(id);
         if (drafts.size >= 100) drafts.delete(drafts.keys().next().value);
         const chatTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data?.turn;
-        const draft = { chatTurn, id: randomUUID(), hash: digest(packet), createdAt: now(), session, turn: userTurn(session), destination, packet, requireMaterials: args.requireMaterials === true, status: 'prepared', result: null };
+        const draft = { chatTurn, id: randomUUID(), requestId: randomUUID(), hash: digest(packet), createdAt: now(), session, turn: userTurn(session), destination, packet, requireMaterials: args.requireMaterials === true, status: 'prepared', result: null };
         drafts.set(draft.id, draft);
-        return { ...baseValue, ok: true, status: 'awaiting_confirmation', delivery: {}, draft: publicDraft(draft) };
+        if (!enableOnlineBridge) return { ...baseValue, ok: true, status: 'awaiting_confirmation', delivery: {}, draft: publicDraft(draft) };
+        const online = await openOnlineBridge(draft, exec);
+        return { ...baseValue, ok: true, status: 'awaiting_online_review', draftId: draft.id, requestId: draft.requestId, url: online.url, browserOpened: online.browserOpened, delivery: {}, draft: publicDraft(draft) };
       } catch (error) { return failed('preparation_failed', String(error.message || 'Could not prepare consultation.')); }
     },
   };
@@ -116,9 +186,11 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if(config.confirmBeforeSend===false)return await send(packet,destination,'automatic',exec,()=>{},continuation);
         if(drafts.size>=100)drafts.delete(drafts.keys().next().value);
         const chatTurn=session.snapshotEvents().findLast(e=>e.type==='turn/start')?.data?.turn;
-        const draft={chatTurn,id:randomUUID(),hash:digest(packet),createdAt:now(),session,turn:userTurn(session),destination,packet,status:'prepared',result:null,continuation};
+        const draft={chatTurn,id:randomUUID(),requestId:randomUUID(),hash:digest(packet),createdAt:now(),session,turn:userTurn(session),destination,packet,status:'prepared',result:null,continuation};
         drafts.set(draft.id,draft);
-        return {...baseValue,ok:true,status:'awaiting_confirmation',delivery:{},draft:publicDraft(draft)};
+        if(!enableOnlineBridge)return {...baseValue,ok:true,status:'awaiting_confirmation',delivery:{},draft:publicDraft(draft)};
+        const online=await openOnlineBridge(draft,exec);
+        return {...baseValue,ok:true,status:'awaiting_online_review',draftId:draft.id,requestId:draft.requestId,url:online.url,browserOpened:online.browserOpened,delivery:{},draft:publicDraft(draft)};
       } catch(error) { return failed('followup_unavailable',String(error.message)); }
     },
   };
@@ -180,9 +252,33 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       if (!draft || draft.session !== sessionOf(exec) || draft.status !== 'settled' || !draft.result) {
         return { ok: false, errorCode: 'consult_result_unavailable' };
       }
+      draft.receivedAt ||= new Date(now()).toISOString();
       const { delivery, ...result } = draft.result;
       return result;
     },
   };
-  return { tool, followupTool, contextTool, resultTool, control, feedbackTool: adoption.tool };
+  const waitTool = {
+    name: 'zesia_consult_wait',
+    description: 'Wait up to N seconds (1-900, default 120) for user approval in https://zesia.dev/consult and return the settled consultation result.',
+    timeoutMs: 905000,
+    parameters: { type: 'object', additionalProperties: false, required: ['draftId'], properties: { draftId: { type: 'string' }, seconds: { type: 'integer', minimum: 1, maximum: 900 } } },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute({ draftId, seconds = 120 }, exec) {
+      clean();
+      const draft = drafts.get(draftId);
+      if (!draft || draft.session !== sessionOf(exec)) return { ok: false, errorCode: 'consult_result_unavailable' };
+      const until = now() + seconds * 1000;
+      while (draft.status !== 'settled' && draft.status !== 'cancelled' && now() < until) {
+        await pause(200);
+      }
+      if (!draft.result) return { ok: true, status: draft.status, draftId, pending: true };
+      draft.receivedAt ||= new Date(now()).toISOString();
+      const { delivery, ...result } = draft.result;
+      return result;
+    },
+  };
+  function close() {
+    for (const draft of drafts.values()) draft.onlineSession?.close?.();
+  }
+  return { tool, followupTool, contextTool, resultTool, waitTool, control, close, feedbackTool: adoption.tool };
 }

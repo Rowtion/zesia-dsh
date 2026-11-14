@@ -45,7 +45,7 @@ test('transport preserves observed failure stages and does not retry unknown out
 test('native progress and adoption retrieval stay in the original session and make no remote request', async () => {
   let calls = 0; const session = { id: 's1', snapshotEvents: () => [{ type: 'user/message' }] };
   const exec = { agent: { session }, signal: new AbortController().signal };
-  const workflow = createConsultWorkflow({ readConfiguration: async () => ({ url: 'https://consult.example', token: 'synthetic' }), preflightRequest: async () => ({ ok: true, modelCalls: 0 }), requestConsult: async ({ onStage }) => { calls++; onStage('discovery'); onStage('cloud_consultation'); return { advice: 'Bounded advice', consultId: 'c2', decision: { nextSteps: [] } }; } });
+  const workflow = createConsultWorkflow({ enableOnlineBridge: false, readConfiguration: async () => ({ url: 'https://consult.example', token: 'synthetic' }), preflightRequest: async () => ({ ok: true, modelCalls: 0 }), requestConsult: async ({ onStage }) => { calls++; onStage('discovery'); onStage('cloud_consultation'); return { advice: 'Bounded advice', consultId: 'c2', decision: { nextSteps: [] } }; } });
   const { draft } = await workflow.tool.execute({ brief: 'Review', project: 'test', context: {} }, exec);
   const control = { draftId: draft.id, draftHash: draft.hash };
   assert.equal((await workflow.control({ ...control, action: 'status' }, exec)).status, 'prepared');

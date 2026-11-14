@@ -17,6 +17,7 @@ function fixture() {
   const session = { id: 'session-1', snapshotEvents: () => events };
   const exec = { agent: { session }, signal: new AbortController().signal };
   const workflow = createConsultWorkflow({
+    enableOnlineBridge: false,
     readConfiguration: async () => config, saveMode: async flag => { config = { ...config, confirmBeforeSend: flag }; return { confirmBeforeSend: flag }; }, now: () => clock,
     preflightRequest: async value => { preflight++; sent.push(structuredClone(value.input)); return { ok: true, modelCalls: 0 }; },
     requestConsult: async value => { paid++; assert.deepEqual(value.input, sent.at(-1)); return { format: 'zesia.consult.v0', advice: 'Bounded advice.', usage: { totalTokens: 20 } }; },
