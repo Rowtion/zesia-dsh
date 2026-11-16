@@ -1,4 +1,4 @@
-import { captureEvidence, mergeEvidence } from './evidence.mjs';
+import { captureEvidence, mergeEvidence, captureAttachments, mergeAttachments } from './evidence.mjs';
 import { createContinuationStore } from './continuation.mjs';
 import { PREPARATION_INSTRUCTIONS } from './prompt.mjs';
 import { createAdoptionTracker, ADOPTION_INSTRUCTIONS } from './adoption.mjs';
@@ -10,9 +10,13 @@ import { createTransportTool } from './transport.mjs';
 
 const TTL = 15 * 60 * 1000;
 function hasReviewMaterials(context) {
-  return Array.isArray(context?.materials) && context.materials.some(material =>
+  const hasMat = Array.isArray(context?.materials) && context.materials.some(material =>
     typeof material?.id === 'string' && material.id.trim() &&
     typeof material.content === 'string' && material.content.trim());
+  const hasAtt = Array.isArray(context?.attachments) && context.attachments.some(att =>
+    typeof att?.id === 'string' && att.id.trim() &&
+    typeof att.data === 'string' && att.data.trim());
+  return hasMat || hasAtt;
 }
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const userTurn = session => session.snapshotEvents().findLastIndex(event => event.type === 'user/message');
@@ -118,7 +122,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   const tool = {
     ...definition,
     description: `${definition.description} ${PREPARATION_INSTRUCTIONS} Default mode: this tool ONLY prepares a local draft for the user's confirmation card. It does not contact 则灵, including preflight, until the user clicks Confirm send. Do not claim advice has arrived when status=awaiting_confirmation. Do not send or approve a draft yourself.`,
-    parameters: { ...definition.parameters, properties: { ...definition.parameters.properties, requireMaterials: { type: 'boolean', description: 'Set true to review a document, deck or other artifact. Attach the actual excerpts in context.materials or evidenceFiles.' }, evidenceFiles: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } } }, description: 'Optional original project file excerpts copied by the plugin; at most 200 lines and 6000 characters each. Never include credentials.' } } },
+    parameters: { ...definition.parameters, properties: { ...definition.parameters.properties, requireMaterials: { type: 'boolean', description: 'Set true to review a document, deck or other artifact. Attach the actual excerpts in context.materials or evidenceFiles.' }, evidenceFiles: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } } }, description: 'Optional original project file excerpts copied by the plugin; auto-chunked along line boundaries into up to 16 materials of 12,000 characters. Never include credentials.' }, attachmentFiles: { type: 'array', maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { id: { type: 'string' }, path: { type: 'string' }, description: { type: 'string' } } }, description: 'Optional project images or documents (png, jpg, webp, gif, pdf, txt, md, json), at most 10 files and 6 MiB total.' } } },
     output: {
       ...definition.output,
       schema: { ...definition.output.schema, required: [...definition.output.schema.required, 'status', 'draft', 'delivery'], properties: { ...definition.output.schema.properties, status: { type: 'string' }, draft: { type: 'object', additionalProperties: true }, delivery: { type: 'object', additionalProperties: true } } },
@@ -152,7 +156,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         const packet = structuredClone({ requester: 'DeepSeek Harness', project: config.project || args?.project, brief: args?.brief, context: args?.context });
         const captured = await captureEvidence(args.evidenceFiles, session);
         if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials || [], captured);
-        if ((packet.context.materials || []).length > 8) throw new Error('At most eight evidence materials are supported.');
+        if ((packet.context.materials || []).length > 16) throw new Error('At most 16 evidence materials are supported.');
+        const capturedAttachments = await captureAttachments(args.attachmentFiles, session);
+        if (capturedAttachments.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAttachments);
+        if ((packet.context.attachments || []).length > 10) throw new Error('At most 10 attachments are supported.');
         if (packet.context.continuation) throw new Error('Use zesia_consult_followup for an existing consultation.');
         validatePacket(packet);
         if (args.requireMaterials && !hasReviewMaterials(packet.context)) return failed('consult_materials_required', 'Attach the document text or relevant excerpts before sending this review. Nothing was sent.');
@@ -176,7 +183,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     description: 'Prepare the next round of this session consultation from actual consultant requests. Load zesia-consult-evidence for observable evidence; zesia-consult-decision for user choices. Default prepares a new confirmation card; never sends without user confirmation. At most three cloud rounds, one draft/attempt per parent response, no retries. Provide only new answers; the card shows the complete accumulated context that will be sent.',
     timeoutMs: 65000,
     parameters: { type: 'object', additionalProperties: false, required: ['consultId','answers'], properties: {
-      consultId: {type:'string'}, answers: {type:'array',minItems:1,maxItems:3,items:{type:'object',additionalProperties:false,required:['requestId','text','sourceRef'],properties:{requestId:{type:'string'},text:{type:'string',maxLength:2000},sourceRef:{type:'string',maxLength:200},sourceQuote:{type:'string',maxLength:2000}}}}, evidenceFiles: tool.parameters.properties.evidenceFiles,
+      consultId: {type:'string'}, answers: {type:'array',minItems:1,maxItems:3,items:{type:'object',additionalProperties:false,required:['requestId','text','sourceRef'],properties:{requestId:{type:'string'},text:{type:'string',maxLength:2000},sourceRef:{type:'string',maxLength:200},sourceQuote:{type:'string',maxLength:2000}}}}, evidenceFiles: tool.parameters.properties.evidenceFiles, attachmentFiles: tool.parameters.properties.attachmentFiles,
     } },
     output: tool.output,
     async execute(args, exec) {
@@ -188,7 +195,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         const packet=continuation.packet;
         const captured=await captureEvidence(args.evidenceFiles,session);
         packet.context.materials=mergeEvidence(packet.context.materials||[],captured);
-        if(packet.context.materials.length>8)throw new Error('At most eight evidence materials are supported. Nothing sent.');
+        if(packet.context.materials.length>16)throw new Error('At most 16 evidence materials are supported. Nothing sent.');
+        const capturedAttachments=await captureAttachments(args.attachmentFiles,session);
+        if(capturedAttachments.length)packet.context.attachments=mergeAttachments(packet.context.attachments||[],capturedAttachments);
+        if((packet.context.attachments||[]).length>10)throw new Error('At most 10 attachments are supported. Nothing sent.');
         validatePacket(packet);
         const config=await readConfiguration(), destination=destinationOf(config);
         // Parent response can produce only one draft/attempt, including automatic mode.

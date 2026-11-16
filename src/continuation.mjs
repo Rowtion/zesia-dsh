@@ -52,7 +52,7 @@ export function createContinuationStore(now = Date.now) {
       packet.context.previousAdvice=[...(packet.context.previousAdvice||[]),parent.result.decision?.assessment,parent.result.decision?.recommendation].filter(Boolean);
       packet.context.continuation={previousConsultId:args.consultId,round:parent.round+1,answers};
       packet.context.materials=[...(packet.context.materials||[]),...answers.map(a=>({id:`answer-${parent.round+1}-${a.requestId}`,content:`Question: ${a.question}\nSource: ${a.sourceRef}\n${a.text}${a.sourceQuote?'\nUser quote: '+a.sourceQuote:''}`}))];
-      if(packet.context.materials.length>8||packet.context.previousAdvice.length>12)throw new Error('The accumulated evidence exceeds the current contract. Narrow the scope explicitly; nothing was sent.');
+      if(packet.context.materials.length>16||packet.context.previousAdvice.length>12)throw new Error('The accumulated evidence exceeds the current contract. Narrow the scope explicitly; nothing was sent.');
       return {packet,contextId,round:parent.round+1,parent,previousConsultId:args.consultId};
     },
   };

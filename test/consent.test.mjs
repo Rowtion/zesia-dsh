@@ -137,14 +137,14 @@ test('unexpected top-level arguments report offending and allowed keys without b
   assert.equal(topGoal.errorCode, 'consult_invalid_input');
   assert.match(topGoal.errorMessage, /Unexpected argument\(s\): goal\./);
   assert.match(topGoal.errorMessage, /Put goal inside context\.goal\./);
-  assert.match(topGoal.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles\./);
+  assert.match(topGoal.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles, attachmentFiles\./);
   assert.deepEqual(f.counts(), { preflight: 0, paid: 0 });
 
   const extra = await f.tool.execute({ ...args, unknownKey: 1, extraFlag: true }, f.exec);
   assert.equal(extra.ok, false);
   assert.equal(extra.errorCode, 'consult_invalid_input');
   assert.match(extra.errorMessage, /Unexpected argument\(s\): unknownKey, extraFlag\./);
-  assert.match(extra.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles\./);
+  assert.match(extra.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles, attachmentFiles\./);
 
   const corrected = await f.tool.execute(args, f.exec);
   assert.equal(corrected.ok, true);
