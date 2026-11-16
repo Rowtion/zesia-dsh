@@ -129,3 +129,24 @@ test('inline draft discovery is bound to the exact session and conversation turn
   assert.doesNotMatch(JSON.stringify(found),/test-secret/);
   f.advance();assert.equal((await f.control({action:'draft_for_turn',turn:17},f.exec)).draft,null);
 });
+
+test('unexpected top-level arguments report offending and allowed keys without blocking retry', async () => {
+  const f = fixture();
+  const topGoal = await f.tool.execute({ ...args, goal: 'Top-level mistake' }, f.exec);
+  assert.equal(topGoal.ok, false);
+  assert.equal(topGoal.errorCode, 'consult_invalid_input');
+  assert.match(topGoal.errorMessage, /Unexpected argument\(s\): goal\./);
+  assert.match(topGoal.errorMessage, /Put goal inside context\.goal\./);
+  assert.match(topGoal.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles\./);
+  assert.deepEqual(f.counts(), { preflight: 0, paid: 0 });
+
+  const extra = await f.tool.execute({ ...args, unknownKey: 1, extraFlag: true }, f.exec);
+  assert.equal(extra.ok, false);
+  assert.equal(extra.errorCode, 'consult_invalid_input');
+  assert.match(extra.errorMessage, /Unexpected argument\(s\): unknownKey, extraFlag\./);
+  assert.match(extra.errorMessage, /Allowed top-level keys: brief, project, context, requireMaterials, evidenceFiles\./);
+
+  const corrected = await f.tool.execute(args, f.exec);
+  assert.equal(corrected.ok, true);
+  assert.equal(corrected.status, 'awaiting_confirmation');
+});

@@ -131,7 +131,18 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       clean();
       if (typeof args?.brief !== 'string' || !args.brief.trim()) return failed('consult_invalid_input', 'Provide a non-empty consultation question. Nothing was sent.');
       if (Object.hasOwn(args, 'materials')) return failed('consult_materials_wrong_field', 'Put inline evidence in context.materials or attach evidenceFiles. Top-level materials were not accepted. Nothing was sent.');
-      if (Object.keys(args).some(key => !Object.hasOwn(tool.parameters.properties, key))) return failed('consult_invalid_input', 'Use only the documented consultation arguments. Nothing was sent.');
+      const allowedKeys = Object.keys(tool.parameters.properties);
+      const unexpectedKeys = Object.keys(args).filter(key => !Object.hasOwn(tool.parameters.properties, key));
+      if (unexpectedKeys.length) {
+        const contextProperties = tool.parameters.properties.context?.properties || {};
+        const contextKeys = unexpectedKeys.filter(key => Object.hasOwn(contextProperties, key));
+        const contextHint = contextKeys.length === 1
+          ? ` Put ${contextKeys[0]} inside context.${contextKeys[0]}.`
+          : contextKeys.length > 1
+            ? ` Put ${contextKeys.join(', ')} inside context.`
+            : '';
+        return failed('consult_invalid_input', `Unexpected argument(s): ${unexpectedKeys.join(', ')}.${contextHint} Allowed top-level keys: ${allowedKeys.join(', ')}. Nothing was sent.`);
+      }
       if (args.requireMaterials !== undefined && typeof args.requireMaterials !== 'boolean') return failed('consult_invalid_input', 'requireMaterials must be a boolean. Nothing was sent.');
       const session = sessionOf(exec);
       if (session?.snapshotEvents && attempts.get(session) === userTurn(session)) return failed('consult_already_attempted', 'A consultation is already prepared or attempted for this message. Use its confirmation card or send a new user request.');
