@@ -31,7 +31,7 @@ async function resolveProjectFile(filePath, session) {
   if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Evidence needs a project-relative path.');
   const target = await realpath(resolve(root, filePath));
   const name = relative(root, target);
-  if (isSensitivePath(name)) throw new Error('Evidence path is outside the project or contains credential/configuration data.');
+  if (isSensitivePath(name)) throw new Error('Evidence or attachment path is outside the project (save temporary screenshots inside the project directory such as .zesia/review/, never /tmp) or contains credential/configuration data.');
   return { target, name };
 }
 
