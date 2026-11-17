@@ -12,7 +12,7 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
       properties: {
         brief: { type: 'string', description: 'The concrete question, at most 8000 characters. Total input is limited to 48000 UTF-8 bytes INCLUDING server instructions and schema; this tool first runs a zero-model-call preflight and reports exact field and budget diagnostics. Do not duplicate the same narrative in brief and originalReply.' },
         project: { type: 'string', description: 'The user project name, not the agent name.' },
-        context: { type: 'object', additionalProperties: false, required: ['goal', 'originalReply', 'facts', 'assumptions', 'attempts', 'userFeedback', 'constraints'], properties: {
+        context: { type: 'object', additionalProperties: false, required: ['goal', 'facts', 'assumptions', 'attempts', 'userFeedback', 'constraints'], properties: {
           goal: { type: 'string', description: 'At most 2000 characters.' }, originalReply: { type: 'string', description: 'At most 8000 characters; include the relevant response, not the full conversation.' },
           ...Object.fromEntries(['facts','assumptions','userFeedback','constraints'].map(key => [key, { type: 'array', items: { type: 'string' }, description: 'At most 12 entries, each at most 2000 characters.' }])),
           statements: { type: 'array', maxItems: 16, description: 'Attributed context; prefer these over duplicated legacy arrays. Attribution is caller-reported, not verified.', items: { type: 'object', additionalProperties: false, required: ['id','kind','origin','text','sourceRef','sourceQuote'], properties: { id: { type: 'string', maxLength: 100 }, kind: { type: 'string', enum: ['fact','constraint','assumption'] }, origin: { type: 'string', enum: ['user_statement','observation','agent_inference'] }, text: { type: 'string', maxLength: 2000 }, sourceRef: { type: 'string', maxLength: 200 }, sourceQuote: { type: 'string', maxLength: 2000 } } } },
@@ -49,7 +49,8 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
         const preflight = await preflightRequest({ url: config.url, token: config.token, input, signal });
         if (!preflight.ok) {
           const issue = preflight.issues[0];
-          return { trace, ...failure(issue.code, issue.message, { ...issue, stage: 'preflight', hint: issue.hint, modelCalls: 0, contentModified: false }, preflight) };
+          const detailMsg = `${issue.field ? `[${issue.field}] ` : ''}${issue.message}${issue.hint ? ` ${issue.hint}` : ''}`;
+          return { trace, ...failure(issue.code, detailMsg, { ...issue, stage: 'preflight', hint: issue.hint, modelCalls: 0, contentModified: false }, preflight) };
         }
         progress('cloud_consultation');
         const result = await requestConsult({ url: config.url, token: config.token, input, contextId: args.contextId, signal, onStage: progress });
