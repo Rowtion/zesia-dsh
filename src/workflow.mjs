@@ -8,7 +8,7 @@ import { openOnlineBrowser, startOnlineReview } from '../node_modules/@zesia/run
 import { readConfig, saveConfirmationMode } from './config.mjs';
 import { createTransportTool } from './transport.mjs';
 
-const TTL = 15 * 60 * 1000;
+const TTL = 24 * 60 * 60 * 1000;
 function hasReviewMaterials(context) {
   const hasMat = Array.isArray(context?.materials) && context.materials.some(material =>
     typeof material?.id === 'string' && material.id.trim() &&
@@ -100,7 +100,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       },
       async recover() { return null; },
     };
-    const session = await startOnlineReview({ runtime: bridgeRuntime, draftId: draft.id, onlineOrigin });
+    const session = await startOnlineReview({ runtime: bridgeRuntime, draftId: draft.id, onlineOrigin, idleMs: TTL, lifetimeMs: TTL });
     draft.onlineSession = session;
     draft.onlineUrl = session.url;
     draft.browserOpened = openBrowser ? await openOnlineBrowser(session.url) : false;
