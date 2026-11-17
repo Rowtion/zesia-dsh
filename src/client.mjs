@@ -316,7 +316,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
 
   async function open() {
     setClosed(false);
-    if (draft.url && !result && !cancelled) {
+    if (draft.url) {
       if (typeof window !== 'undefined' && typeof window.open === 'function') {
         window.open(draft.url, '_blank', 'noopener,noreferrer');
       }
@@ -331,7 +331,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
 
   useEffect(() => {
     if (!autoOpen) return;
-    if (draft.url && !result && !cancelled) { void refresh().catch(() => {}); return; }
+    if (draft.url) { void refresh().catch(() => {}); return; }
     void open();
   }, [autoOpen]);
   useEffect(() => {
