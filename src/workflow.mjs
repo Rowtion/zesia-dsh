@@ -154,6 +154,8 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         const config = await readConfiguration();
         const destination = destinationOf(config);
         const packet = structuredClone({ requester: 'DeepSeek Harness', project: config.project || args?.project, brief: args?.brief, context: args?.context });
+        if (typeof packet.context?.originalReply === 'string' && !packet.context.originalReply.trim()) delete packet.context.originalReply;
+        if (typeof packet.context?.goal === 'string' && !packet.context.goal.trim()) delete packet.context.goal;
         const captured = await captureEvidence(args.evidenceFiles, session);
         if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials || [], captured);
         if ((packet.context.materials || []).length > 16) throw new Error('At most 16 evidence materials are supported.');
