@@ -275,6 +275,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
   const shownBrief = sent ? summaryText(brief, 120) : isLong && !requestExpanded ? previewText(brief, limit) : brief;
   const openLabel = returned || (result && !cancelled) ? tr('查看咨询结果', 'View consultation result')
     : cancelled ? tr('查看取消记录', 'View cancelled consultation')
+    : draft.url ? tr('在 zesia.dev 中审核', 'Review on zesia.dev')
     : sending || closed ? tr('继续咨询', 'Continue consultation')
     : tr('打开咨询', 'Open consultation');
   const statusNote = !closed ? ''
@@ -315,12 +316,24 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
 
   async function open() {
     setClosed(false);
+    if (draft.url && !result && !cancelled) {
+      if (typeof window !== 'undefined' && typeof window.open === 'function') {
+        window.open(draft.url, '_blank', 'noopener,noreferrer');
+      }
+      try { await refresh(); }
+      catch { setUnknown(true); setError(tr('无法检查咨询状态。', 'Could not check the consultation status.')); }
+      return;
+    }
     if (dialog.current && !dialog.current.open) dialog.current.showModal();
     try { await refresh(); }
     catch { setUnknown(true); setError(tr('无法检查咨询状态。', 'Could not check the consultation status.')); }
   }
 
-  useEffect(() => { if (autoOpen) void open(); }, [autoOpen]);
+  useEffect(() => {
+    if (!autoOpen) return;
+    if (draft.url && !result && !cancelled) { void refresh().catch(() => {}); return; }
+    void open();
+  }, [autoOpen]);
   useEffect(() => {
     const element = dialog.current;
     if (!element || typeof element.addEventListener !== 'function') return;

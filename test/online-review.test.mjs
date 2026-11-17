@@ -26,6 +26,9 @@ test('DSH workflow opens shared zesia.dev/consult online bridge and zesia_consul
     const prepared = await workflow.tool.execute({ project: 'demo', brief: 'Review plan', context: { goal: 'Verify bridge' } }, exec);
     assert.equal(prepared.ok, true);
     assert.equal(prepared.status, 'awaiting_online_review');
+    for (const key of Object.keys(prepared)) {
+      assert.ok(Object.hasOwn(workflow.tool.output.schema.properties, key), `undeclared output field: ${key}`);
+    }
     assert.equal(calls, 0);
 
     const parsed = new URL(prepared.url);
