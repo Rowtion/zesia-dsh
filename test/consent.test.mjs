@@ -23,7 +23,7 @@ function fixture() {
     requestConsult: async value => { paid++; assert.deepEqual(value.input, sent.at(-1)); return { format: 'zesia.consult.v0', advice: 'Bounded advice.', usage: { totalTokens: 20 } }; },
   });
   const send = (draft, packet = draft.packet, extra = {}) => workflow.control({ action: 'send', draftId: draft.id, draftHash: draft.hash, approvedHash: hash(packet), packet, ...extra }, exec);
-  return { ...workflow, exec, events, send, counts: () => ({ preflight, paid }), sent, setConfig: value => { config = value; }, advance: () => { clock += 16 * 60 * 1000; } };
+  return { ...workflow, exec, events, send, counts: () => ({ preflight, paid }), sent, setConfig: value => { config = value; }, advance: () => { clock += 24 * 60 * 60 * 1000 + 1; } };
 }
 test('default model call prepares exact local draft; no preflight or external call before confirmation', async () => {
   const f = fixture();
