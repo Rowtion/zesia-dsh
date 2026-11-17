@@ -63,7 +63,11 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
         if (/Configure the (?:Zesia|则灵) trial token/.test(error.message || '')) return failure('configuration_missing', 'Configure the 则灵 trial token: npm run configure', { stage: 'configuration', modelCalls: 0 });
         const budget = error.metadata?.maxInputBytes;
         const used = error.metadata?.inputBytes;
-        return { trace, ...failure(code, budget ? `Server input budget: ${used || 'unknown'} / ${budget} UTF-8 bytes, including system and expert instructions.` : 'The consultation did not complete. Report the error; do not repeatedly retry.', { stage, errorId: crypto.randomUUID(), outcome: ['configuration','preflight','discovery'].includes(stage) ? 'not_started' : 'unknown', used: used ? Number(used) : null, limit: budget ? Number(budget) : null, unit: budget ? 'utf8_bytes' : null }) };
+        const outcome = error.outcome === 'not_started' || ['configuration','preflight','discovery'].includes(stage) ? 'not_started' : 'unknown';
+        const fallbackMsg = outcome === 'not_started' && error.message
+          ? `${error.message} Report the error; do not repeatedly retry.`
+          : 'The consultation did not complete. Report the error; do not repeatedly retry.';
+        return { trace, ...failure(code, budget ? `Server input budget: ${used || 'unknown'} / ${budget} UTF-8 bytes, including system and expert instructions.` : fallbackMsg, { stage, errorId: crypto.randomUUID(), outcome, used: used ? Number(used) : null, limit: budget ? Number(budget) : null, unit: budget ? 'utf8_bytes' : null }) };
       }
 
     },

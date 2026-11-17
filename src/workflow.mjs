@@ -84,7 +84,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if (userTurn(current.session) !== current.turn) throw new Error('The conversation changed. Prepare a new draft.');
         current.status = 'sending';
         try {
-          current.result = await send(structuredClone(current.packet), current.destination, 'confirmed', exec, row => { (current.trace ||= []).push(row); }, current.continuation);
+          current.result = await send(structuredClone(current.packet), current.destination, 'confirmed', { agent: exec?.agent }, row => { (current.trace ||= []).push(row); }, current.continuation);
         } catch (error) {
           current.result = failed('send_failed', String(error.message || 'Sending did not complete.'));
         }
