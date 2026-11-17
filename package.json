@@ -1,6 +1,6 @@
 {
   "name": "@zesia/dsh-plugin",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "private": true,
   "description": "Zesia consultation button and tool for DeepSeek Harness",
   "type": "module",
