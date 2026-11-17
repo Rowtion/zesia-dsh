@@ -10,12 +10,12 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
     parameters: {
       type: 'object', additionalProperties: false, required: ['brief', 'project', 'context'],
       properties: {
-        brief: { type: 'string', description: 'The concrete question, at most 8000 characters. Total input is limited to 48000 UTF-8 bytes INCLUDING server instructions and schema; this tool first runs a zero-model-call preflight and reports exact field and budget diagnostics. Do not duplicate the same narrative in brief and originalReply.' },
+        brief: { type: 'string', description: 'The concrete question, at most 8000 characters. Total input is limited to 131072 UTF-8 bytes INCLUDING server instructions and schema; this tool first runs a zero-model-call preflight and reports exact field and budget diagnostics. Do not duplicate the same narrative in brief and originalReply.' },
         project: { type: 'string', description: 'The user project name, not the agent name.' },
-        context: { type: 'object', additionalProperties: false, required: ['goal', 'facts', 'assumptions', 'attempts', 'userFeedback', 'constraints'], properties: {
+        context: { type: 'object', additionalProperties: false, properties: {
           goal: { type: 'string', description: 'At most 2000 characters.' }, originalReply: { type: 'string', description: 'At most 8000 characters; include the relevant response, not the full conversation.' },
           ...Object.fromEntries(['facts','assumptions','userFeedback','constraints'].map(key => [key, { type: 'array', items: { type: 'string' }, description: 'At most 12 entries, each at most 2000 characters.' }])),
-          statements: { type: 'array', maxItems: 16, description: 'Attributed context; prefer these over duplicated legacy arrays. Attribution is caller-reported, not verified.', items: { type: 'object', additionalProperties: false, required: ['id','kind','origin','text','sourceRef','sourceQuote'], properties: { id: { type: 'string', maxLength: 100 }, kind: { type: 'string', enum: ['fact','constraint','assumption'] }, origin: { type: 'string', enum: ['user_statement','observation','agent_inference'] }, text: { type: 'string', maxLength: 2000 }, sourceRef: { type: 'string', maxLength: 200 }, sourceQuote: { type: 'string', maxLength: 2000 } } } },
+          statements: { type: 'array', maxItems: 16, description: 'Attributed context; prefer these over duplicated legacy arrays. Attribution is caller-reported, not verified.', items: { type: 'object', additionalProperties: false, required: ['id','kind','origin','text','sourceRef','sourceQuote'], properties: { id: { type: 'string', maxLength: 100 }, kind: { type: 'string', enum: ['fact','constraint','assumption'] }, origin: { type: 'string', enum: ['user_statement','observation','agent_inference'] }, text: { type: 'string', maxLength: 2000 }, sourceRef: { type: 'string', minLength: 1, maxLength: 200 }, sourceQuote: { type: 'string', maxLength: 2000 } } } },
           previousAdvice: { type: 'array', items: { type: 'string' }, description: 'Optional previous consultation, at most 12 entries of 2000 characters. Server history is not retained.' },
           materials: { type: 'array', description: 'Optional evidence contents, at most 16 materials of 12000 characters; a URL alone is not evidence.', items: { type: 'object', additionalProperties: false, required: ['id','content'], properties: { id: { type: 'string' }, content: { type: 'string' } } } },
           attachments: { type: 'array', maxItems: 10, description: 'Optional image or document attachments (png, jpg, webp, gif, pdf, txt, md, json), at most 10 items and 6 MiB total.', items: { type: 'object', additionalProperties: false, required: ['id','mediaType','data'], properties: { id: { type: 'string' }, filename: { type: 'string' }, mediaType: { type: 'string' }, data: { type: 'string' }, description: { type: 'string' } } } },
@@ -65,10 +65,16 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
         const budget = error.metadata?.maxInputBytes;
         const used = error.metadata?.inputBytes;
         const outcome = error.outcome === 'not_started' || ['configuration','preflight','discovery'].includes(stage) ? 'not_started' : 'unknown';
-        const fallbackMsg = outcome === 'not_started' && error.message
+        // Surface the concrete transport root cause (timeout, payload-too-large,
+        // connection reset, unknown outcome) instead of collapsing it into a
+        // generic message. Scalars only; never attach request bodies or prose.
+        const fallbackMsg = error.message
           ? `${error.message} Report the error; do not repeatedly retry.`
           : 'The consultation did not complete. Report the error; do not repeatedly retry.';
-        return { trace, ...failure(code, budget ? `Server input budget: ${used || 'unknown'} / ${budget} UTF-8 bytes, including system and expert instructions.` : fallbackMsg, { stage, errorId: crypto.randomUUID(), outcome, used: used ? Number(used) : null, limit: budget ? Number(budget) : null, unit: budget ? 'utf8_bytes' : null }) };
+        const detail = { stage, errorId: crypto.randomUUID(), outcome, used: used ? Number(used) : null, limit: budget ? Number(budget) : null, unit: budget ? 'utf8_bytes' : null };
+        if (typeof error.status === 'number') detail.status = error.status;
+        if (typeof error.cause === 'string' || typeof error.cause === 'number') detail.cause = error.cause;
+        return { trace, ...failure(code, budget ? `Server input budget: ${used || 'unknown'} / ${budget} UTF-8 bytes, including system and expert instructions.` : fallbackMsg, detail) };
       }
 
     },

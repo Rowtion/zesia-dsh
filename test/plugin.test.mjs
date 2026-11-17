@@ -13,6 +13,21 @@ test('host registers a model-visible consult tool with bounded execution and adv
   assert.ok(tool.parameters.required.includes('context'));
   assert.match(tool.output.render({}, { ok: true, advice: 'Verify before retry.', primaryExpert: 'general', routeStatus: 'uncertain', consultation: { advice: 'Verify before retry.' } })[0].text, /grants no additional authority/);
 });
+test('context sub-fields are optional, attributed sources are bounded and the byte budget matches the platform', () => {
+  let tool; apply({ skills:{register(){}}, provide() {}, typert: { register() {} }, commands: { register() {} }, tools: { register(value) { if (value.name === 'zesia_consult') tool = value; } } });
+  const context = tool.parameters.properties.context;
+  assert.equal(context.required, undefined, 'context sub-fields mirror the platform optional contract');
+  assert.equal(context.properties.statements.items.properties.sourceRef.minLength, 1);
+  assert.match(tool.parameters.properties.brief.description, /131072 UTF-8 bytes/);
+});
+test('unknown transport outcome keeps its root-cause message and status instead of a generic failure', async () => {
+  const tool = createConsultTool({ readConfiguration: async () => ({ url: 'https://example.com', token: 'test' }), preflightRequest: async () => ({ ok: true, modelCalls: 0 }), requestConsult: async () => { throw Object.assign(new Error('Consultation outcome is unknown. Do not retry automatically.'), { outcome: 'unknown', retryAllowed: false, cause: 'ETIMEDOUT', status: 504 }); } });
+  const result = await tool.execute({ brief: 'Review', project: 'test', context: {} }, { signal: new AbortController().signal });
+  assert.equal(result.ok, false);
+  assert.match(result.errorMessage, /Consultation outcome is unknown/);
+  assert.equal(result.error.cause, 'ETIMEDOUT');
+  assert.equal(result.error.status, 504);
+});
 test('tool rejects an empty question before reading credentials or using the network', async () => {
   let tool; apply({ skills:{register(){}}, provide() {}, typert: { register() {} }, commands: { register() {} }, tools: { register(value) { if (value.name === 'zesia_consult') tool = value; } } });
   const result = await tool.execute({ brief: '', project: 'test', context: {} }, {});
