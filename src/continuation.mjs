@@ -31,7 +31,10 @@ export function createContinuationStore(now = Date.now) {
       });
       return {ok:true,contextId:parent.result.a2a?.contextId,round:parent.round,maxRounds:MAX_ROUNDS,consumed:parent.consumed,followUp:parent.result.followUp?.requests||[],userStatements};
     },
-    verify(session,id,answers) { const parent=entries(session).get(id);if(!parent)throw new Error('Consultation expired.');return validateAnswers(session,parent,answers); },
+    verifyPrepared(session, continuation, answers) {
+      // The draft retains its verified parent even after the lookup index expires.
+      return validateAnswers(session, continuation.parent, answers);
+    },
     remember(session, result, packet, round=1) {
       const c=result.consultation;
       if (!session || !result.ok || !c?.consultId) return;

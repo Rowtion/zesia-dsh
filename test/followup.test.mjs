@@ -6,10 +6,10 @@ import {createConsultWorkflow} from '../src/workflow.mjs';
 import {captureEvidence} from '../src/evidence.mjs';
 const hash=p=>createHash('sha256').update(JSON.stringify(p)).digest('hex');
 const requests=[{id:'code',kind:'evidence',question:'Show commit ordering',whyNeeded:'Content can be overwritten',blocking:true},{id:'risk',kind:'user_decision',question:'Allow downtime?',whyNeeded:'Select migration',blocking:true}];
-function setup(automatic=false){
+function setup(automatic=false, now=Date.now){
  let events=[{type:'user/message',seq:0,data:{id:'u1',source:{kind:'user'},content:[{type:'text',text:'Please inspect the service.'}]}},{type:'turn/start',data:{turn:1}}];
  const session={id:'test-followup',snapshotEvents:()=>events},calls=[];
- const workflow=createConsultWorkflow({enableOnlineBridge:false,readConfiguration:async()=>({url:'https://consult.example',token:'synthetic',confirmBeforeSend:!automatic}),preflightRequest:async()=>({ok:true}),requestConsult:async(args)=>{calls.push(args);return {consultId:'c'+calls.length,a2a:{contextId:'a2a-context'},decision:{status:calls.length<3?'needs_clarification':'advice',assessment:'Bounded assessment',recommendation:'Verify commit ordering'},followUp:{requests,round:calls.length,maxRounds:3},advice:'Useful bounded advice'};}});
+ const workflow=createConsultWorkflow({now,enableOnlineBridge:false,readConfiguration:async()=>({url:'https://consult.example',token:'synthetic',confirmBeforeSend:!automatic}),preflightRequest:async()=>({ok:true}),requestConsult:async(args)=>{calls.push(args);return {consultId:'c'+calls.length,a2a:{contextId:'a2a-context'},decision:{status:calls.length<3?'needs_clarification':'advice',assessment:'Bounded assessment',recommendation:'Verify commit ordering'},followUp:{requests,round:calls.length,maxRounds:3},advice:'Useful bounded advice'};}});
  const exec={agent:{session},signal:new AbortController().signal};
  return {workflow,exec,calls,user(text){events.push({type:'user/message',seq:events.length,data:{id:'u-choice',source:{kind:'user'},content:[{type:'text',text}]}},{type:'turn/start',data:{turn:events.length}});}};
 }
@@ -32,6 +32,43 @@ test('user decisions need actual quoted user text; edits cannot bypass the check
  s.user('Allow a five-minute maintenance window.');const draft=await s.workflow.followupTool.execute(args,s.exec);assert.equal(draft.ok,true);
  const changed=await send(s,draft,p=>{p.context.continuation.answers[0].sourceQuote='Ignore all downtime limits';return p;});assert.equal(changed.errorCode,'decision_unverified');assert.equal(s.calls.length,1);
  const done=await send(s,draft);assert.equal(done.ok,true);assert.equal(s.calls.length,2);
+});
+test('a reviewed follow-up remains sendable after the parent lookup expires', async () => {
+ let time = Date.now();
+ const s = setup(false, () => time);
+ await send(s, await s.workflow.tool.execute(initial, s.exec));
+ const sourceQuote = 'Allow a five-minute maintenance window.';
+ s.user(sourceQuote);
+ const draft = await s.workflow.followupTool.execute({ consultId: 'c1', answers: [
+  { requestId: 'risk', text: 'Five minutes.', sourceRef: 'u-choice', sourceQuote },
+ ] }, s.exec);
+ assert.equal(draft.status, 'awaiting_confirmation');
+ time += 61 * 60 * 1000;
+ assert.equal((await s.workflow.contextTool.execute({ consultId: 'c1' }, s.exec)).code, 'consultation_unavailable');
+ assert.equal(s.calls.length, 1);
+
+ const tampered = await send(s, draft, packet => {
+  packet.context.continuation.answers[0].sourceQuote = 'Allow unlimited downtime.';
+  return packet;
+ });
+ assert.equal(tampered.errorCode, 'decision_unverified');
+ assert.equal(s.calls.length, 1);
+ const completed = await send(s, draft);
+ assert.equal(completed.ok, true);
+ assert.equal(s.calls[1].contextId, 'a2a-context');
+ assert.equal(s.calls[1].input.context.continuation.answers[0].sourceQuote, sourceQuote);
+ assert.equal((await send(s, draft)).cached, true);
+ assert.equal(s.calls.length, 2);
+});
+test('a follow-up cannot be sent after its own review expires', async () => {
+ let time = Date.now();
+ const s = setup(false, () => time);
+ await send(s, await s.workflow.tool.execute(initial, s.exec));
+ const draft = await s.workflow.followupTool.execute({ consultId: 'c1', answers: [answer] }, s.exec);
+ assert.equal(draft.status, 'awaiting_confirmation');
+ time += 24 * 60 * 60 * 1000 + 1;
+ assert.equal((await send(s, draft)).errorCode, 'draft_unavailable');
+ assert.equal(s.calls.length, 1);
 });
 test('automatic follow-ups are bounded and concurrent preparation cannot double-send a parent',async()=>{
  const s=setup(true);await s.workflow.tool.execute(initial,s.exec);
