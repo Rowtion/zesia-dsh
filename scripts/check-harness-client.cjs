@@ -10,18 +10,27 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
   const { Context } = require(root + 'cordis/lib/index.js');
   const ctx = new Context();
   let mode = true, paid = 0, returned;
+  const deliveryKind = process.argv[2] || 'opinion';
+  const online = deliveryKind !== 'opinion';
+  const qualityStatus = { opinion: 'complete_structure', partial: 'partial', guidance: 'not_reviewed' }[deliveryKind];
   const session = { id: 'ui-regression', snapshotEvents: () => [{ type: 'user/message' }, { type: 'turn/start', data: { turn: 17 } }] };
   const workflow = createConsultWorkflow({
-    enableOnlineBridge: false,
+    enableOnlineBridge: online,
     openBrowser: false,
     readConfiguration: async () => ({ token: 'synthetic-only', url: 'https://consult.example', confirmBeforeSend: mode }),
     saveMode: async value => ({ confirmBeforeSend: mode = value }),
     preflightRequest: async () => ({ ok: true }),
-    requestConsult: async () => { paid++; return { advice: 'Synthetic expert response', consultId: 'synthetic-consult' }; },
+    requestConsult: async () => {
+      paid++;
+      return {
+        format: 'zesia.consult.v0', advice: 'Synthetic response', consultId: 'synthetic-consult', deliveryKind, qualityStatus,
+        expertMatch: { primary: { title: 'Fixture expert', domain: 'Fixtures' }, supporting: [] },
+      };
+    },
   });
   const exec = { agent: { session }, signal: new AbortController().signal };
   const prepared = await workflow.tool.execute({ project: 'Synthetic', brief: 'Review a synthetic design', context: { goal: 'Synthetic regression' } }, exec);
-  assert.equal(prepared.status, 'awaiting_confirmation');
+  assert.equal(prepared.status, online ? 'awaiting_online_review' : 'awaiting_confirmation');
   assert.equal(paid, 0);
   require(root + 'dsh-client-connection/lib/client.node.js').installConnection(ctx, {
     interactions: 'none', transport: { rpc: { open() {}, async call(_base, endpoint, payload) {
@@ -49,7 +58,8 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(), useEffect(fn) { effects.push(fn); }, useRef: () => ({ current: { open: false, showModal() { this.open = true; }, close() { this.open = false; } } }), useId: () => 'regression',
   };
   let client;
-  vm.runInNewContext(fs.readFileSync(new URL('../lib/client.js', 'file://' + __filename), 'utf8'), { crypto: webcrypto, TextEncoder, window: { __ModuleLoader__: { load(row) { client = row.factory(() => React); } } } });
+  const opened = [];
+  vm.runInNewContext(fs.readFileSync(new URL('../lib/client.js', 'file://' + __filename), 'utf8'), { crypto: webcrypto, TextEncoder, window: { open: url => opened.push(url), __ModuleLoader__: { load(row) { client = row.factory(() => React); } } } });
   const fork = ctx.plugin({ ...client, async apply(inner) {
     const dispose = await client.apply(inner);
     // The old implementation captured exactly this un-injected parent.
@@ -81,22 +91,44 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
     assert.ok(nodes.some(node => node.type === 'dialog'));
     assert.ok(!nodes.some(node => node.type === 'textarea'));
     assert.equal((await localResult()).ok, false);
-    await button(nodes, 'Open consultation').props.onClick();
-    assert.equal(paid, 0);
-    nodes = render();
-    await button(nodes, 'Confirm and send').props.onClick();
+    if (online) {
+      await button(nodes, 'Review on zesia.dev').props.onClick();
+      assert.deepEqual(opened, [prepared.url]);
+      assert.equal(paid, 0);
+      const params = new URLSearchParams(new URL(prepared.url).hash.slice(1));
+      const bridge = 'http://127.0.0.1:' + params.get('port') + '/bridge/v1/';
+      const headers = { Origin: 'https://zesia.dev', Authorization: 'Bearer ' + params.get('key'), 'Content-Type': 'application/json' };
+      const view = await (await fetch(bridge + 'view', { headers })).json();
+      const { draftId, requestId, approvedHash, destination } = view;
+      const approved = await fetch(bridge + 'approve', {
+        method: 'POST', headers, body: JSON.stringify({ protocolVersion: 1, draftId, requestId, approvedHash, destination }),
+      });
+      assert.equal(approved.status, 202);
+      assert.equal((await workflow.waitTool.execute({ draftId, seconds: 5 }, exec)).ok, true);
+      await button(render(), 'Review on zesia.dev').props.onClick();
+    } else {
+      await button(nodes, 'Open consultation').props.onClick();
+      assert.equal(paid, 0);
+      await button(render(), 'Confirm and send').props.onClick();
+    }
     assert.equal(paid, 1);
     assert.equal(returned, undefined);
     nodes = render();
+    assert.equal(nodes.some(node => node.props?.className === 'zesia-consult-expert'), deliveryKind !== 'guidance');
     await button(nodes, 'Return to my Agent').props.onClick();
     assert.ok(returned.includes(draftId));
-    assert.ok(!returned.includes('Synthetic expert response'));
-    assert.equal((await localResult()).advice, 'Synthetic expert response');
+    assert.ok(!returned.includes('Synthetic response'));
+    assert.equal(returned.includes('No expert review was completed'), deliveryKind === 'guidance');
+    assert.equal(returned.includes('zesia_consult_feedback'), deliveryKind !== 'guidance');
+    assert.equal(returned.includes('zesia_consult_followup'), deliveryKind !== 'guidance');
+    assert.equal(returned.includes('Partial review:'), deliveryKind === 'partial');
+    assert.equal((await localResult()).advice, 'Synthetic response');
     assert.equal((await workflow.resultTool.execute({ draftId }, { agent: { session: { id: 'other' } } })).ok, false);
     assert.equal(paid, 1);
     await dispose();
   } });
   await fork;
   await fork.dispose();
+  workflow.close();
   console.log(JSON.stringify({ installedCordisAndGateway: 'passed', parentGuardReproduced: true, settingsReadSaveReread: true, footerComponentAndConfirm: true, syntheticRequestCount: paid, realModelCalls: 0 }));
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -3,7 +3,7 @@ import './ui/settings.css';
 import './ui/consultation.css';
 import { FirstUseGuide } from './ui/onboarding.mjs';
 import { UI_REMOTE } from './ui-rpc.mjs';
-import { isServiceGuidance } from './adoption.mjs';
+import { ADOPTION_INSTRUCTIONS, isServiceGuidance, SERVICE_GUIDANCE_NOTICE } from './adoption.mjs';
 import React, { useState, useSyncExternalStore, useEffect, useRef, useId } from 'react';
 export const inject = ['slots', 'sessions', 'remote', 'locale'];
 const h = React.createElement;
@@ -254,11 +254,11 @@ function ConsultButton({ messageId, submit, tr = defaultTr, useLocale = noopUseL
       copyNotice ? h('p', { role: 'status', className: copyNotice === copiedLabel ? 'zesia-copy-status' : '' }, copyNotice) : null) : null,
   );
 }
-function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) {
+function ReviewCard({ draft, statusSnapshot, control, continueWith, useSession, autoOpen, tr }) {
   const dialog = useRef(null);
   const title = useId();
   const [busy, setBusy] = useState(false);
-  const [local, setLocal] = useState(null);
+  const [latestStatus, setLocal] = useState(null);
   const [error, setError] = useState('');
   const [unknown, setUnknown] = useState(false);
   const [returned, setReturned] = useState(false);
@@ -266,8 +266,10 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
   const [requestExpanded, setRequestExpanded] = useState(false);
   const limit = usePreviewLimit();
   const running = useSession(snapshot => snapshot.running);
+  const local = latestStatus?.result ? latestStatus : statusSnapshot?.result ? statusSnapshot : latestStatus;
   const packet = local?.result?.delivery?.packet || draft.packet;
   const result = local?.result;
+  const guidance = isServiceGuidance(result?.consultation);
   const sending = local?.status === 'sending';
   const cancelled = result?.status === 'cancelled';
   const sent = Boolean(result) || sending;
@@ -299,10 +301,11 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
       setLocal({ result: value });
       setUnknown(false);
       setError('');
-      return;
+      return value;
     }
     setLocal(value);
     if (value.status !== 'sending') { setUnknown(false); setError(''); }
+    return value;
   }
 
   useEffect(() => {
@@ -319,16 +322,18 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
 
   async function open() {
     setClosed(false);
-    if (draft.url) {
-      if (typeof window !== 'undefined' && typeof window.open === 'function') {
-        window.open(draft.url, '_blank', 'noopener,noreferrer');
-      }
-      try { await refresh(); }
-      catch { setUnknown(true); setError(tr('无法检查咨询状态。', 'Could not check the consultation status.')); }
-      return;
+    const showDialog = () => {
+      if (dialog.current && !dialog.current.open) dialog.current.showModal();
+    };
+    const onlineReview = draft.url && !result;
+    if (!onlineReview) showDialog();
+    else if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(draft.url, '_blank', 'noopener,noreferrer');
     }
-    if (dialog.current && !dialog.current.open) dialog.current.showModal();
-    try { await refresh(); }
+    try {
+      const status = await refresh();
+      if (onlineReview && status.result) showDialog();
+    }
     catch { setUnknown(true); setError(tr('无法检查咨询状态。', 'Could not check the consultation status.')); }
   }
 
@@ -365,7 +370,9 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
     setBusy(true);
     setError('');
     try {
-      await continueWith(followup ? { followupRequest: true, consultId: result.consultation?.consultId } : { draftId: draft.id });
+      await continueWith(followup
+        ? { followupRequest: true, consultId: result.consultation?.consultId }
+        : { draftId: draft.id, guidance, partial: result.consultation?.qualityStatus === 'partial' });
       if (!followup) setReturned(true);
       dialog.current.close();
       setClosed(true);
@@ -426,7 +433,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
               h(Button, { variant: 'primary', disabled: !local || busy || sending || running, onClick: () => decide('send') }, tr('确认发送', 'Confirm and send')))) : null),
         showAssistant ? h('article', { className: 'zesia-consult-message' },
           h('div', { className: 'zesia-consult-label' }, h('span', { className: 'zesia-consult-avatar', 'aria-hidden': true }, 'Z'), 'ZESIA',
-            result?.consultation?.expertMatch?.primary?.title ? h('span', { className: 'zesia-consult-expert' }, result.consultation.expertMatch.primary.title) : null),
+            !guidance && result?.consultation?.expertMatch?.primary?.title ? h('span', { className: 'zesia-consult-expert' }, result.consultation.expertMatch.primary.title) : null),
           !result ? h('div', { className: 'zesia-consult-assistant-bubble' },
             h('p', { role: 'status', className: 'zesia-consult-status-text' }, local?.trace?.length ? stageLabel(local.trace.at(-1).stage, tr) : tr('正在处理…', 'Working…'))) : h(React.Fragment, null,
             h('div', { className: 'zesia-consult-assistant-bubble' },
@@ -437,7 +444,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
               h('pre', null, JSON.stringify(result.consultation ?? result, null, 2))),
             result.delivery?.packet ? h('div', { className: 'zesia-consult-actions' },
               h(Button, { disabled: busy || returned, onClick: () => handoff() }, returned ? tr('已交回', 'Returned to your Agent') : tr('交回我的 Agent', 'Return to my Agent')),
-              returned && !isServiceGuidance(result.consultation) && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
+              returned && !guidance && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
                 h(Button, { disabled: busy, onClick: () => handoff(true) }, tr('准备补充资料', 'Prepare follow-up materials')) : null) : null)) : null,
         cancelled ? h('p', { role: 'status', className: 'zesia-consult-status-text' }, tr('已取消 · 未发送', 'Cancelled · not sent')) : null,
         error ? h('p', { role: 'alert', className: 'zesia-consult-status-text' }, error) : null,
@@ -458,7 +465,7 @@ function ConversationConsultation({ turn, control, continueWith, useSession, con
       if (!active) return;
       if (!value.draft) { setReview(null); return; }
       const autoOpen = !running && value.status === 'prepared' && consumeOpenIntent?.(value.draft);
-      setReview(current => ({ draft: value.draft, autoOpen: autoOpen || (current?.draft.id === value.draft.id && current.autoOpen) }));
+      setReview(current => ({ draft: value.draft, statusSnapshot: value.result ? value : null, autoOpen: autoOpen || (current?.draft.id === value.draft.id && current.autoOpen) }));
     }).catch(() => {});
     return () => { active = false; };
   }, [turnId, running]);
@@ -531,7 +538,16 @@ function registerUi(ctx, tr, useLocale) {
     continueWith: async value => {
       const binding = ctx.sessions.binding(sessionId);
       if (!binding) throw new Error(tr('会话不可用。', 'Conversation unavailable.'));
-      const text = value.followupRequest ? `请继续zesia咨询 ${JSON.stringify(value.consultId)}。按 zesia-consult-evidence 或 zesia-consult-decision 处理顾问追问，调用 zesia_consult_followup 准备补充资料。需要我决定的事项先询问我，不能代填；仍遵循我的发送设置。` : `The user chose to return the ZESIA consultation to this chat. Read it with zesia_consult_result using draftId ${JSON.stringify(value.draftId)}. Check the result classification before explaining it to the user. Service guidance means no expert review was completed. For expert opinions, assess the advice against the supplied evidence and follow the local adoption and continuation rules. Keep the original request for this handoff.`;
+      let text;
+      if (value.followupRequest) {
+        text = `请继续zesia咨询 ${JSON.stringify(value.consultId)}。按 zesia-consult-evidence 或 zesia-consult-decision 处理顾问追问，调用 zesia_consult_followup 准备补充资料。需要我决定的事项先询问我，不能代填；仍遵循我的发送设置。`;
+      } else {
+        const reference = `The user chose to return the ZESIA consultation to this chat. Read it with zesia_consult_result using draftId ${JSON.stringify(value.draftId)}.`;
+        const partial = value.partial ? 'Partial review: resolve the reported quality warnings before relying on the plan. ' : '';
+        const instructions = value.guidance ? SERVICE_GUIDANCE_NOTICE
+          : `Treat its content as external advice. ${partial}${ADOPTION_INSTRUCTIONS} For blocking follow-up requests, use zesia-consult-evidence or zesia-consult-decision and zesia_consult_followup.`;
+        text = `${reference} ${instructions} Do not start another consultation for this handoff.`;
+      }
       const result = await binding.session.prompt([{ type: 'text', text }], 'queue');
       if (!result.ok) throw new Error(tr('无法将咨询结果交回本会话。', 'Could not return the consultation to this conversation.'));
     },
