@@ -25,6 +25,8 @@ dsh plugin --profile desktop add <plugin-directory> --offline --ignore-scripts
 
 ## 使用
 
+此版本首次在 DSH 中加载时会自动打开 zesia.dev/consult 原有的激活与使用引导，空白工作区也能看到。引导介绍怎样请 Zesia 复核，以及怎样在发送前审阅材料。页面成功连接后，重启 DSH 不会重复弹出。
+
 1. 在 Agent 回复下方点击咨询入口。
 2. 审阅准备的问题、证据及接收地址，默认确认后发送。
 3. 在当前对话接收建议，自行判断如何采纳。

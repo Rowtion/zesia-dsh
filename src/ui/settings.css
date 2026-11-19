@@ -24,6 +24,9 @@
   color: var(--foreground); background: var(--background); font: inherit; font-size: 14px; line-height: 1.5;
   box-shadow: 0 16px 64px #0003;
 }
+.zesia-guide-fallback { inset: auto 16px 16px auto; width: min(350px, calc(100vw - 32px)); padding: 16px; pointer-events: auto; z-index: 1; }
+.zesia-guide-fallback p { margin: 0 0 8px; }
+.zesia-guide-fallback a { margin-inline-end: 12px; color: inherit; }
 .zesia-settings::backdrop { background: var(--dsw-alias-bg-mask-1, #0006); }
 .zesia-settings-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 20px 0; }
 .zesia-settings-header h2 { font: inherit; font-size: 16px; font-weight: 600; margin: 0; }

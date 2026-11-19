@@ -12,6 +12,8 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
   let mode = true, paid = 0, returned;
   const session = { id: 'ui-regression', snapshotEvents: () => [{ type: 'user/message' }, { type: 'turn/start', data: { turn: 17 } }] };
   const workflow = createConsultWorkflow({
+    enableOnlineBridge: false,
+    openBrowser: false,
     readConfiguration: async () => ({ token: 'synthetic-only', url: 'https://consult.example', confirmBeforeSend: mode }),
     saveMode: async value => ({ confirmBeforeSend: mode = value }),
     preflightRequest: async () => ({ ok: true }),
@@ -23,13 +25,20 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
   assert.equal(paid, 0);
   require(root + 'dsh-client-connection/lib/client.node.js').installConnection(ctx, {
     interactions: 'none', transport: { rpc: { open() {}, async call(_base, endpoint, payload) {
+      if (endpoint === 'zesiaUi/onboarding') {
+        assert.equal(payload.args.action, 'open');
+        assert.equal(payload.args.agentId, undefined);
+        return { ok: true, value: { state: 'opened' } };
+      }
       assert.ok(['zesiaUi/control','zesiaUi/settings'].includes(endpoint));
       if(endpoint==='zesiaUi/control')assert.equal(payload.args.agentId,session.id);else assert.equal(payload.args.agentId,undefined);
       return { ok: true, value: await workflow.control(payload.args.input, exec) };
     } } },
   });
-  new (require(root + 'dsh-typert-registry/lib/index.js').TypertRegistry)(ctx);
+  require(root + 'dsh-typert-registry/lib/client.node.js').apply(ctx);
   require(root + 'dsh-api-gateway/lib/client.node.js').apply(ctx);
+  const locale = { active: 'en' };
+  ctx.provide('locale', { getSnapshot: () => locale, subscribe: () => () => {} });
   const slots = [];
   ctx.provide('slots', { inject(_name, fn) { fn(); }, register(row, view) { slots.push({ row, view }); } });
   ctx.provide('sessions', { binding() { return { session: { getSnapshot: () => ({ running: false }), async prompt(parts) { returned = parts[0].text; return { ok: true }; } } }; } });
@@ -45,7 +54,9 @@ const root = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh
     const dispose = await client.apply(inner);
     // The old implementation captured exactly this un-injected parent.
     assert.throws(() => inner.remote.zesiaUi, /without inject/);
-    const actions = slots.find(s => s.row.name === 'conversation.chat.assistant-actions');
+    const welcome = slots.find(s => s.row.name === 'shell.overlay' && s.row.id === 'zesia-first-use');
+    assert.ok(welcome);
+    assert.equal((await welcome.row.inject().onboarding('open')).state, 'opened');
     const global=slots.find(s=>s.row.name==='settings.section'&&s.row.id==='zesia');
     assert.ok(global);assert.equal(global.row.label(),'zesia');
     const props = global.row.inject();
