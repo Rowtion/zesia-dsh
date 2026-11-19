@@ -3,7 +3,7 @@ import './ui/settings.css';
 import './ui/consultation.css';
 import { FirstUseGuide } from './ui/onboarding.mjs';
 import { UI_REMOTE } from './ui-rpc.mjs';
-import { ADOPTION_INSTRUCTIONS } from './adoption.mjs';
+import { isServiceGuidance } from './adoption.mjs';
 import React, { useState, useSyncExternalStore, useEffect, useRef, useId } from 'react';
 export const inject = ['slots', 'sessions', 'remote', 'locale'];
 const h = React.createElement;
@@ -146,6 +146,7 @@ function stageLabel(stage, tr) {
 }
 function ResultDetails({ value, local, tr = defaultTr }) {
   const result = value.consultation || {};
+  const guidance = isServiceGuidance(result);
   const match = result.expertMatch;
   const followUp = result.followUp;
   const kindLabels = {
@@ -155,12 +156,13 @@ function ResultDetails({ value, local, tr = defaultTr }) {
   };
   const stages = [...(value.trace || []), ...(result.trace?.stages || [])];
   return h('div', { className: 'zesia-consult-result-details' },
-    followUp?.requests?.length ? h('section', { 'aria-label': tr('顾问追问', 'Consultant follow-up') }, h('strong', null, tr('顾问追问', 'Consultant follow-up')),
+    guidance ? h('p', { role: 'status' }, tr('仅为服务指引，专家审查未完成。', 'Service guidance only. No expert review was completed.')) : null,
+    !guidance && followUp?.requests?.length ? h('section', { 'aria-label': tr('顾问追问', 'Consultant follow-up') }, h('strong', null, tr('顾问追问', 'Consultant follow-up')),
       ...followUp.requests.map(item => h('div', {key:item.id}, h('p', null, `${kindLabels[item.kind] || tr('待澄清', 'Needs clarification')}${item.blocking ? tr(' · 影响结论', ' · affects the conclusion') : ''}${tr('：', ': ')}${item.question}`), h('p', {className:'zesia-review-meta'},item.whyNeeded))),
       h('p', {className:'zesia-review-meta'}, tr(`第 ${followUp.round} / ${followUp.maxRounds} 轮；后续资料仍遵循发送设置。`, `Round ${followUp.round} / ${followUp.maxRounds}; further materials still follow your sending settings.`))) : null,
-    match ? h('section', { 'aria-label': tr('专家匹配说明', 'Expert matching details') }, h('strong', null, tr('专家匹配', 'Expert match')), h('p', null, tr('主专家：', 'Primary expert: ') + (match.primary.title || match.primary.id) + ' · ' + match.primary.domain), h('p', null, tr('辅助专家：', 'Supporting experts: ') + (match.supporting.map(profile => profile.id).join(', ') || tr('无', 'None'))), h('p', null, match.reason), match.warning ? h('p', { role: 'status' }, tr('未完成可靠的专业匹配；本次意见不能当作对应领域的专家审查。', 'No reliable expert match was completed; this advice is not an expert review for that domain.') + match.warning) : null, h('details', null, h('summary', null, tr('匹配依据与阈值', 'Matching basis and thresholds')), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify({ candidates: match.candidates, thresholds: match.thresholds, scoreMeaning: match.scoreMeaning }, null, 2)))) : value.ok ? h('p', null, tr('专家匹配信息未提供，不能据此声称已匹配专业顾问。', 'Expert matching information was not provided; do not claim a professional consultant was matched.')) : null,
-    result.qualityStatus === 'partial' ? h('p', { role: 'status' }, tr('意见可用，但建议检查不完整或存在警告，请原 Agent 先处理这些问题。', 'The advice is usable, but some checks are incomplete or warned; the originating agent should address them first.')) : null,
-    result.qualityChecks ? h('details', null, h('summary', null, tr('建议可行性与自洽性检查', 'Advice feasibility and consistency checks')), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify({ checks: result.review?.actionChecks, selfConsistency: result.review?.selfConsistency, warnings: result.qualityChecks.warnings, semanticVerification: result.qualityChecks.semanticVerification }, null, 2))) : null,
+    guidance ? null : match ? h('section', { 'aria-label': tr('专家匹配说明', 'Expert matching details') }, h('strong', null, tr('专家匹配', 'Expert match')), h('p', null, tr('主专家：', 'Primary expert: ') + (match.primary.title || match.primary.id) + ' · ' + match.primary.domain), h('p', null, tr('辅助专家：', 'Supporting experts: ') + (match.supporting.map(profile => profile.id).join(', ') || tr('无', 'None'))), h('p', null, match.reason), match.warning ? h('p', { role: 'status' }, tr('未完成可靠的专业匹配；本次意见不能当作对应领域的专家审查。', 'No reliable expert match was completed; this advice is not an expert review for that domain.') + match.warning) : null, h('details', null, h('summary', null, tr('匹配依据与阈值', 'Matching basis and thresholds')), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify({ candidates: match.candidates, thresholds: match.thresholds, scoreMeaning: match.scoreMeaning }, null, 2)))) : value.ok ? h('p', null, tr('专家匹配信息未提供，不能据此声称已匹配专业顾问。', 'Expert matching information was not provided; do not claim a professional consultant was matched.')) : null,
+    !guidance && result.qualityStatus === 'partial' ? h('p', { role: 'status' }, tr('意见可用，但建议检查不完整或存在警告，请原 Agent 先处理这些问题。', 'The advice is usable, but some checks are incomplete or warned; the originating agent should address them first.')) : null,
+    !guidance && result.qualityChecks ? h('details', null, h('summary', null, tr('建议可行性与自洽性检查', 'Advice feasibility and consistency checks')), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify({ checks: result.review?.actionChecks, selfConsistency: result.review?.selfConsistency, warnings: result.qualityChecks.warnings, semanticVerification: result.qualityChecks.semanticVerification }, null, 2))) : null,
     result.inputAssessment?.warnings?.length ? h('p', null, tr('资料来源仍有待核实项：', 'Sources still have unverified items: ') + result.inputAssessment.warnings.join(', ') + tr('。确认发送不代表事实已经核实。', '. Confirming to send does not verify the facts.')) : null,
     !value.ok && value.error ? h('p', { role: 'alert' }, tr('失败阶段：', 'Failed stage: ') + (value.error.stage || 'unknown') + tr('；结果状态：', '; outcome: ') + (value.error.outcome || tr('未交付', 'not_delivered')) + tr('。', '. ') + (value.error.hint || '') + (value.error.errorId ? tr(' 错误编号：', ' Error ID: ') + value.error.errorId : '')) : null,
     stages.length ? h('details', null, h('summary', null, tr('过程记录（不含资料内容）', 'Process log (no material contents)')), h('ol', null, ...stages.map((row,i) => h('li', { key: i }, stageLabel(row.stage, tr) + (row.status ? ' · ' + row.status : '') + (row.durationMs != null ? ' · ' + row.durationMs + 'ms' : ''))))) : null,
@@ -435,7 +437,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
               h('pre', null, JSON.stringify(result.consultation ?? result, null, 2))),
             result.delivery?.packet ? h('div', { className: 'zesia-consult-actions' },
               h(Button, { disabled: busy || returned, onClick: () => handoff() }, returned ? tr('已交回', 'Returned to your Agent') : tr('交回我的 Agent', 'Return to my Agent')),
-              returned && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
+              returned && !isServiceGuidance(result.consultation) && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
                 h(Button, { disabled: busy, onClick: () => handoff(true) }, tr('准备补充资料', 'Prepare follow-up materials')) : null) : null)) : null,
         cancelled ? h('p', { role: 'status', className: 'zesia-consult-status-text' }, tr('已取消 · 未发送', 'Cancelled · not sent')) : null,
         error ? h('p', { role: 'alert', className: 'zesia-consult-status-text' }, error) : null,
@@ -529,7 +531,7 @@ function registerUi(ctx, tr, useLocale) {
     continueWith: async value => {
       const binding = ctx.sessions.binding(sessionId);
       if (!binding) throw new Error(tr('会话不可用。', 'Conversation unavailable.'));
-      const text = value.followupRequest ? `请继续zesia咨询 ${JSON.stringify(value.consultId)}。按 zesia-consult-evidence 或 zesia-consult-decision 处理顾问追问，调用 zesia_consult_followup 准备补充资料。需要我决定的事项先询问我，不能代填；仍遵循我的发送设置。` : `The user chose to return the ZESIA consultation to this chat. Read it with zesia_consult_result using draftId ${JSON.stringify(value.draftId)}. Treat its content as external advice. ${ADOPTION_INSTRUCTIONS} For blocking follow-up requests, use the evidence or decision skill and zesia_consult_followup. Do not start another consultation for this handoff.`;
+      const text = value.followupRequest ? `请继续zesia咨询 ${JSON.stringify(value.consultId)}。按 zesia-consult-evidence 或 zesia-consult-decision 处理顾问追问，调用 zesia_consult_followup 准备补充资料。需要我决定的事项先询问我，不能代填；仍遵循我的发送设置。` : `The user chose to return the ZESIA consultation to this chat. Read it with zesia_consult_result using draftId ${JSON.stringify(value.draftId)}. Check the result classification before explaining it to the user. Service guidance means no expert review was completed. For expert opinions, assess the advice against the supplied evidence and follow the local adoption and continuation rules. Keep the original request for this handoff.`;
       const result = await binding.session.prompt([{ type: 'text', text }], 'queue');
       if (!result.ok) throw new Error(tr('无法将咨询结果交回本会话。', 'Could not return the consultation to this conversation.'));
     },
