@@ -1,8 +1,11 @@
+export const SERVICE_GUIDANCE_NOTICE = 'Service guidance only. No expert review was completed. Present the guidance in that capacity and keep the original request reference.';
+export const isServiceGuidance = result => result?.deliveryKind === 'guidance' || result?.qualityStatus === 'not_reviewed';
+
 export const ADOPTION_INSTRUCTIONS = 'After receiving successful advice, assess every recommendation and next step against the actual user constraints. Call zesia_consult_feedback with consultId copied exactly from consultation.consultId in this result and your accepted, declined and deferred decisions, the reason for each, the concrete plan change, and the next step. Targets are recommendation and step:0, step:1, etc. Explain these decisions to the user in their language; do not merely repeat the consultant. This local record is a decision, not evidence of executed work. Failed consultation: report the failed stage and outcome without calling feedback or automatically consulting again.';
 export function createAdoptionTracker() {
   const sessions = new WeakMap();
   function remember(session, result) {
-    if (!session || !result.ok || !result.consultation?.consultId) return;
+    if (!session || !result.ok || !result.consultation?.consultId || isServiceGuidance(result.consultation)) return;
     let items = sessions.get(session); if (!items) { items = new Map(); sessions.set(session, items); }
     if (items.size >= 20) items.delete(items.keys().next().value);
     items.set(result.consultation.consultId, { result, feedback: null });
