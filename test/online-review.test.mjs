@@ -6,8 +6,10 @@ for (const classification of [
   { deliveryKind: 'opinion', qualityStatus: 'complete_structure' },
   { deliveryKind: 'partial', qualityStatus: 'partial' },
   { deliveryKind: 'guidance', qualityStatus: 'not_reviewed' },
+  { deliveryKind: 'opinion', qualityStatus: 'complete_structure', resultSchemaVersion: 'zesia.consult.result.v2',
+    nextAction: { kind: 'supply_evidence', blocking: true, requests: [{ id: 'actual', kind: 'evidence', question: 'Which file proves this?' }] } },
 ]) {
-  test(`DSH workflow opens the shared review and returns the settled ${classification.deliveryKind} result`, async () => {
+  test(`DSH workflow opens the shared review and returns the settled ${classification.resultSchemaVersion ? 'v2' : classification.deliveryKind} result`, async () => {
     let calls = 0;
     const session = { id: 'online-s1', snapshotEvents: () => [{ type: 'user/message' }] };
     const exec = { agent: { session }, signal: new AbortController().signal };
@@ -61,6 +63,12 @@ for (const classification of [
       const again = await workflow.resultTool.execute({ draftId: prepared.draftId }, exec);
       assert.equal(again.advice, 'Use the shared online window.');
       assert.equal(again.consultation.deliveryKind, classification.deliveryKind);
+      if (classification.resultSchemaVersion) {
+        assert.equal(again.status, 'awaiting_input');
+        assert.deepEqual(again.consultation.nextAction, classification.nextAction);
+        const context = await workflow.contextTool.execute({ consultId: 'dsh-online-1' }, exec);
+        assert.deepEqual(context.followUp, classification.nextAction.requests);
+      }
       for (const [tool, value] of [[workflow.waitTool, result], [workflow.resultTool, again], [workflow.tool, result]]) {
         const parts = tool.output.render({}, value);
         if (classification.deliveryKind === 'guidance') {

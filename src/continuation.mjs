@@ -1,10 +1,12 @@
+import { consultFollowUpRequests } from './consult-result.mjs';
+
 const explicitUserMessage = e => e.type === 'user/message' && e.data?.source?.kind === 'user' && !(e.data.content || []).some(p => p.type === 'text' && /^(The user confirmed this consultation packet through the (?:则灵|zesia) UI\.|The user chose to return the ZESIA consultation to this chat\.|请继续(?:则灵|zesia)咨询 |请先加载 zesia-consult-prepare|Load zesia-consult-prepare|\/zesia(?:\s|$))/.test(p.text));
 const MAX_ROUNDS = 3, TTL = 60 * 60 * 1000;
 export function createContinuationStore(now = Date.now) {
   const sessions = new WeakMap();
   const entries = session => { let map=sessions.get(session); if (!map) {map=new Map();sessions.set(session,map);} for(const [id,r] of map)if(now()-r.createdAt>TTL)map.delete(id);return map; };
   function validateAnswers(session,parent,answersInput) {
-      const requests=parent.result.followUp?.requests || [];
+      const requests=consultFollowUpRequests(parent.result);
       if(!Array.isArray(answersInput)||!answersInput.length||answersInput.length>3)throw new Error('Answer one to three actual consultant requests.');
       const seen=new Set();
       const answers=answersInput.map(answer=>{
@@ -29,7 +31,7 @@ export function createContinuationStore(now = Date.now) {
         const text=(e.data.content||[]).filter(p=>p.type==='text').map(p=>p.text).join('\n');
         return {sourceRef:e.data.id||e.data.messageId||`seq:${e.seq}`,text:text.slice(0,2000),truncated:text.length>2000};
       });
-      return {ok:true,contextId:parent.result.a2a?.contextId,round:parent.round,maxRounds:MAX_ROUNDS,consumed:parent.consumed,followUp:parent.result.followUp?.requests||[],userStatements};
+      return {ok:true,contextId:parent.result.a2a?.contextId,round:parent.round,maxRounds:MAX_ROUNDS,consumed:parent.consumed,followUp:consultFollowUpRequests(parent.result),userStatements};
     },
     verify(session,id,answers) { const parent=entries(session).get(id);if(!parent)throw new Error('Consultation expired.');return validateAnswers(session,parent,answers); },
     remember(session, result, packet, round=1) {

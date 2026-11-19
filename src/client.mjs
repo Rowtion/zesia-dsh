@@ -1,3 +1,4 @@
+import { consultFollowUpRequests } from './consult-result.mjs';
 import { Button, RadioGroup } from './ui/arc.mjs';
 import './ui/settings.css';
 import './ui/consultation.css';
@@ -149,6 +150,7 @@ function ResultDetails({ value, local, tr = defaultTr }) {
   const guidance = isServiceGuidance(result);
   const match = result.expertMatch;
   const followUp = result.followUp;
+  const requests = consultFollowUpRequests(result);
   const kindLabels = {
     evidence: tr('补充证据', 'Add evidence'),
     user_decision: tr('需要你决定', 'Your decision needed'),
@@ -157,8 +159,8 @@ function ResultDetails({ value, local, tr = defaultTr }) {
   const stages = [...(value.trace || []), ...(result.trace?.stages || [])];
   return h('div', { className: 'zesia-consult-result-details' },
     guidance ? h('p', { role: 'status' }, tr('仅为服务指引，专家审查未完成。', 'Service guidance only. No expert review was completed.')) : null,
-    !guidance && followUp?.requests?.length ? h('section', { 'aria-label': tr('顾问追问', 'Consultant follow-up') }, h('strong', null, tr('顾问追问', 'Consultant follow-up')),
-      ...followUp.requests.map(item => h('div', {key:item.id}, h('p', null, `${kindLabels[item.kind] || tr('待澄清', 'Needs clarification')}${item.blocking ? tr(' · 影响结论', ' · affects the conclusion') : ''}${tr('：', ': ')}${item.question}`), h('p', {className:'zesia-review-meta'},item.whyNeeded))),
+    !guidance && requests.length ? h('section', { 'aria-label': tr('顾问追问', 'Consultant follow-up') }, h('strong', null, tr('顾问追问', 'Consultant follow-up')),
+      ...requests.map(item => h('div', {key:item.id}, h('p', null, `${kindLabels[item.kind] || tr('待澄清', 'Needs clarification')}${item.blocking ? tr(' · 影响结论', ' · affects the conclusion') : ''}${tr('：', ': ')}${item.question}`), h('p', {className:'zesia-review-meta'},item.whyNeeded))),
       h('p', {className:'zesia-review-meta'}, tr(`第 ${followUp.round} / ${followUp.maxRounds} 轮；后续资料仍遵循发送设置。`, `Round ${followUp.round} / ${followUp.maxRounds}; further materials still follow your sending settings.`))) : null,
     guidance ? null : match ? h('section', { 'aria-label': tr('专家匹配说明', 'Expert matching details') }, h('strong', null, tr('专家匹配', 'Expert match')), h('p', null, tr('主专家：', 'Primary expert: ') + (match.primary.title || match.primary.id) + ' · ' + match.primary.domain), h('p', null, tr('辅助专家：', 'Supporting experts: ') + (match.supporting.map(profile => profile.id).join(', ') || tr('无', 'None'))), h('p', null, match.reason), match.warning ? h('p', { role: 'status' }, tr('未完成可靠的专业匹配；本次意见不能当作对应领域的专家审查。', 'No reliable expert match was completed; this advice is not an expert review for that domain.') + match.warning) : null, h('details', null, h('summary', null, tr('匹配依据与阈值', 'Matching basis and thresholds')), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify({ candidates: match.candidates, thresholds: match.thresholds, scoreMeaning: match.scoreMeaning }, null, 2)))) : value.ok ? h('p', null, tr('专家匹配信息未提供，不能据此声称已匹配专业顾问。', 'Expert matching information was not provided; do not claim a professional consultant was matched.')) : null,
     !guidance && result.qualityStatus === 'partial' ? h('p', { role: 'status' }, tr('意见可用，但建议检查不完整或存在警告，请原 Agent 先处理这些问题。', 'The advice is usable, but some checks are incomplete or warned; the originating agent should address them first.')) : null,
@@ -437,7 +439,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
               h('pre', null, JSON.stringify(result.consultation ?? result, null, 2))),
             result.delivery?.packet ? h('div', { className: 'zesia-consult-actions' },
               h(Button, { disabled: busy || returned, onClick: () => handoff() }, returned ? tr('已交回', 'Returned to your Agent') : tr('交回我的 Agent', 'Return to my Agent')),
-              returned && !isServiceGuidance(result.consultation) && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
+              returned && !isServiceGuidance(result.consultation) && consultFollowUpRequests(result.consultation).length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
                 h(Button, { disabled: busy, onClick: () => handoff(true) }, tr('准备补充资料', 'Prepare follow-up materials')) : null) : null)) : null,
         cancelled ? h('p', { role: 'status', className: 'zesia-consult-status-text' }, tr('已取消 · 未发送', 'Cancelled · not sent')) : null,
         error ? h('p', { role: 'alert', className: 'zesia-consult-status-text' }, error) : null,
