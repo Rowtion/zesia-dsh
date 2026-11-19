@@ -36,6 +36,7 @@ test('DSH A2A request carries only the core packet and an optional caller reques
   assert.equal(result.a2a.contextId, 'ctx-1');
   const body = server.body();
   assert.equal(body.method, 'SendMessage');
+  assert.deepEqual(body.params.configuration.acceptedOutputModes, [CONSULT_MEDIA_TYPE]);
   assert.equal(body.params.message.role, 'ROLE_USER');
   assert.equal(body.params.message.messageId, 'client-request-1');
   assert.equal(body.params.message.parts.length, 1);
