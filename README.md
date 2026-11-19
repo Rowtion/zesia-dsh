@@ -25,6 +25,8 @@ Installation requires Node.js 22+ and ordinary host permissions, not administrat
 
 ## Use
 
+The first time this version loads in DSH, the shared onboarding page at zesia.dev/consult opens, even in an empty workspace. It explains how to ask for a second opinion and review the materials before sending. After the page connects, subsequent DSH restarts keep the guide closed.
+
 1. Select the ZESIA action beneath an agent reply.
 2. Review the prepared question, evidence and destination; confirmation is required by default.
 3. Receive the advice in the conversation and decide what to adopt.

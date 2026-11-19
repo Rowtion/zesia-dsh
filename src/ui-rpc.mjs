@@ -21,9 +21,19 @@ export const CONSULT_COMMAND_RPC_DESCRIPTOR = {
   parameters:[UI_RPC_DESCRIPTOR.parameters[0], {name:'messageId',wire:'messageId',source:'json',codec:strict('replyId',()=>z.string().min(1).max(200))}],
   cancellation:{parameter:'signal'},result:strict('commandResult',()=>z.unknown()),
 };
-export const UI_REMOTE = { package: '@zesia/dsh-plugin-ui', descriptors: [UI_RPC_DESCRIPTOR, SETTINGS_RPC_DESCRIPTOR, CONSULT_COMMAND_RPC_DESCRIPTOR] };
-export function registerUiRpc(ctx, workflow) {
+const ONBOARDING_RPC_DESCRIPTOR = {
+  id: '@zesia/dsh-plugin-ui#zesiaUi/onboarding', service: 'zesiaUi', namespace: 'zesiaUi', method: 'onboarding',
+  invocation: { kind: 'direct' },
+  parameters: [
+    { name: 'action', wire: 'action', source: 'json', codec: strict('onboardingAction', () => z.enum(['open', 'dismiss'])) },
+    { name: 'locale', wire: 'locale', source: 'json', codec: strict('onboardingLocale', () => z.enum(['en', 'zh'])) },
+  ],
+  result: strict('onboardingState', () => z.object({ state: z.enum(['seen', 'opened', 'link']), url: z.string().optional() })),
+};
+export const UI_REMOTE = { package: '@zesia/dsh-plugin-ui', descriptors: [UI_RPC_DESCRIPTOR, SETTINGS_RPC_DESCRIPTOR, CONSULT_COMMAND_RPC_DESCRIPTOR, ONBOARDING_RPC_DESCRIPTOR] };
+export function registerUiRpc(ctx, workflow, onboarding) {
   const service = {
+    onboarding(action, locale) { return onboarding(action, locale); },
     async consult(agent, messageId, signal) {
       if (typeof messageId !== 'string' || !messageId || messageId.length > 200) throw new Error('Invalid reply ID.');
       const executed = await ctx.commands.execute(agent, '/zesia ' + JSON.stringify(messageId), [], signal);
@@ -41,5 +51,5 @@ export function registerUiRpc(ctx, workflow) {
   };
   service.typertRemote = { service, serviceKey: 'zesiaUi', namespace: 'zesiaUi' };
   ctx.provide('zesiaUi', service);
-  ctx.typert.register({ package: '@zesia/dsh-plugin-ui', face: 'host', model: {}, schemas: [], invocations: [UI_RPC_DESCRIPTOR, SETTINGS_RPC_DESCRIPTOR, CONSULT_COMMAND_RPC_DESCRIPTOR] });
+  ctx.typert.register({ package: '@zesia/dsh-plugin-ui', face: 'host', model: {}, schemas: [], invocations: [UI_RPC_DESCRIPTOR, SETTINGS_RPC_DESCRIPTOR, CONSULT_COMMAND_RPC_DESCRIPTOR, ONBOARDING_RPC_DESCRIPTOR] });
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { consultationPrompt } from './prompt.mjs';
 import { registerConsultSkills } from './skills.mjs';
+import { createOnboarding } from './onboarding.mjs';
 import { registerUiRpc } from './ui-rpc.mjs';
 import { createConsultWorkflow } from './workflow.mjs';
 export { createConsultWorkflow } from './workflow.mjs';
@@ -10,7 +11,8 @@ export const inject = ['tools', 'commands', 'typert', 'skills'];
 export function apply(ctx) {
   registerConsultSkills(ctx);
   const workflow = createConsultWorkflow();
-  registerUiRpc(ctx, workflow);
+  const onboarding = createOnboarding();
+  registerUiRpc(ctx, workflow, onboarding.handle);
   ctx.tools.register(workflow.tool);
   ctx.tools.register(workflow.feedbackTool);
   ctx.tools.register(workflow.followupTool);
@@ -49,4 +51,5 @@ export function apply(ctx) {
       } catch { return { kind: 'error', text: 'Could not apply the consultation action. No automatic retry was performed.' }; }
     },
   });
+  return () => onboarding.close();
 }

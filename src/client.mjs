@@ -1,6 +1,7 @@
 import { Button, RadioGroup } from './ui/arc.mjs';
 import './ui/settings.css';
 import './ui/consultation.css';
+import { FirstUseGuide } from './ui/onboarding.mjs';
 import { UI_REMOTE } from './ui-rpc.mjs';
 import { ADOPTION_INSTRUCTIONS } from './adoption.mjs';
 import React, { useState, useSyncExternalStore, useEffect, useRef, useId } from 'react';
@@ -494,6 +495,10 @@ function registerUi(ctx, tr, useLocale) {
     }
     return response.value;
   };
+  const onboarding = async action => unwrap(await ctx.remote.zesiaUi.onboarding(action, tr('zh', 'en')));
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay', id: 'zesia-first-use', inject: () => ({ onboarding, tr, useLocale }),
+  }, FirstUseGuide));
   const settingsControl = async input => unwrap(await ctx.remote.zesiaUi.settings(input));
   ctx.slots.inject('settings.section', () => ctx.slots.register({name:'settings.section',id:'zesia',order:25,label:()=>'zesia',inject:()=>({control:settingsControl, tr, useLocale})}, GlobalSettings));
   const openIntents = new Map();
