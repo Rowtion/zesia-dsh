@@ -34,4 +34,8 @@ jobs:
             exit 1
           fi
           mapfile -t ASSETS < <(find dist -maxdepth 1 -type f -print | sort)
-          gh release create "v$VERSION" "${ASSETS[@]}" --target "$GITHUB_SHA" --title "v$VERSION" --notes 'Built and tested from this exact source commit. Checksums and source metadata are attached.'
+          RELEASE_OPTIONS=()
+          if [[ "$VERSION" == *-* ]]; then
+            RELEASE_OPTIONS+=(--prerelease)
+          fi
+          gh release create "v$VERSION" "${ASSETS[@]}" "${RELEASE_OPTIONS[@]}" --target "$GITHUB_SHA" --title "v$VERSION" --notes 'Built and tested from this exact source commit. Checksums and source metadata are attached.'
