@@ -269,6 +269,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
   const packet = local?.result?.delivery?.packet || draft.packet;
   const result = local?.result;
   const sending = local?.status === 'sending';
+  const recoveryNeeded = local?.status === 'unknown' || result?.status === 'unknown';
   const cancelled = result?.status === 'cancelled';
   const sent = Boolean(result) || sending;
   const materials = Array.isArray(packet.context?.materials) ? packet.context.materials : [];
@@ -284,6 +285,7 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
   const statusNote = !closed ? ''
     : returned ? tr('已交回原 Agent；结果仍保存在本次咨询中。', 'Returned to your Agent; the result remains saved in this consultation.')
     : cancelled ? tr('已取消，未发送。', 'Cancelled; nothing was sent.')
+    : recoveryNeeded ? tr('结果暂未确认，可查询同一请求。', 'The outcome is unknown. Check the same request for its saved result.')
     : result ? result.ok
       ? tr('结果已收到，尚未交回原 Agent。重新打开不会重复咨询。', 'Review ready; not yet returned to your Agent. Reopening will not repeat the consultation.')
       : tr('咨询失败；重新打开可查看记录，不会自动重发。', 'The consultation failed; reopen to review it. It will not be resent automatically.')
@@ -435,13 +437,13 @@ function ReviewCard({ draft, control, continueWith, useSession, autoOpen, tr }) 
             h('details', { className: 'zesia-consult-disclosure' },
               h('summary', null, tr('原始 A2A 结果', 'Raw A2A result')),
               h('pre', null, JSON.stringify(result.consultation ?? result, null, 2))),
-            result.delivery?.packet ? h('div', { className: 'zesia-consult-actions' },
+            result.ok && result.delivery?.packet ? h('div', { className: 'zesia-consult-actions' },
               h(Button, { disabled: busy || returned, onClick: () => handoff() }, returned ? tr('已交回', 'Returned to your Agent') : tr('交回我的 Agent', 'Return to my Agent')),
               returned && !isServiceGuidance(result.consultation) && result.consultation?.followUp?.requests?.length && result.consultation.followUp.round < result.consultation.followUp.maxRounds ?
                 h(Button, { disabled: busy, onClick: () => handoff(true) }, tr('准备补充资料', 'Prepare follow-up materials')) : null) : null)) : null,
         cancelled ? h('p', { role: 'status', className: 'zesia-consult-status-text' }, tr('已取消 · 未发送', 'Cancelled · not sent')) : null,
         error ? h('p', { role: 'alert', className: 'zesia-consult-status-text' }, error) : null,
-        unknown ? h(Button, { onClick: async () => {
+        unknown || recoveryNeeded ? h(Button, { onClick: async () => {
           try { await refresh(); setError(''); }
           catch { setError(tr('无法检查咨询状态。', 'Could not check the consultation status.')); }
         } }, tr('查询本地状态', 'Check local status')) : null)));
