@@ -411,7 +411,15 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     if (draft.requireMaterials && !hasReviewMaterials(input.packet.context)) return failed('consult_materials_required', 'This review needs at least one attached excerpt. Nothing was sent.');
     const approvedContinuation=input.packet.context.continuation;
     if(draft.continuation ? approvedContinuation?.previousConsultId!==draft.continuation.previousConsultId || approvedContinuation?.round!==draft.continuation.round : Boolean(approvedContinuation)) return failed('continuation_changed','The consultation identity changed; prepare a new draft.');
-    if(draft.continuation) { try { const checked=continuations.verify(session,draft.continuation.previousConsultId,approvedContinuation.answers);if(checked.some((a,i)=>a.question!==approvedContinuation.answers[i].question))throw new Error('The consultant question changed.'); } catch(error){return failed('decision_unverified',error.message);} }
+    if (draft.continuation) {
+      try {
+        const checked = continuations.verifyPrepared(session, draft.continuation, approvedContinuation.answers);
+        if (checked.some((answer, index) => answer.question !== approvedContinuation.answers[index].question))
+          throw new Error('The consultant question changed.');
+      } catch (error) {
+        return failed('decision_unverified', error.message);
+      }
+    }
     if (digest(input.packet) !== input.approvedHash) return failed('preview_changed', 'The confirmed packet did not match the reviewed content. Nothing was sent.');
     return sendDraft(draft, structuredClone(input.packet), exec);
   }
