@@ -33,6 +33,7 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
   const runs = new Map();
   let preflights = 0;
   let recoverCompleted = false;
+  let followupReads = 0;
   let now = Date.now();
   let fixtureError;
   const server = createServer(async (req, res) => {
@@ -43,7 +44,9 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
         assert.equal(req.url, '/v1/consult/requests/' + requestId);
         reads.push(requestId);
         const result = runs.get(requestId);
-        const state = result && recoverCompleted ? 'completed' : 'running';
+        const followupStillRunning = result?.consultId === 'recovery-2' && ++followupReads === 1;
+        const state = result && recoverCompleted && !followupStillRunning ? 'completed' : 'running';
+        if (followupStillRunning) now += 2001;
         res.end(JSON.stringify({ requestId, contextId, state, ...(state === 'completed' ? { result } : {}) }));
         return;
       }
@@ -103,8 +106,11 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
   assert.equal(sends.length, 0);
   assert.equal(preflights, 0);
   assert.equal((await approved.approve()).status, 202);
-  const unknown = await original.waitTool.execute({ draftId: prepared.draftId, seconds: 4 }, exec);
-  assert.equal(unknown.status, 'unknown');
+  const pending = await original.waitTool.execute({ draftId: prepared.draftId, seconds: 1 }, exec);
+  assert.equal(pending.status, 'running');
+  assert.equal(pending.pending, true);
+  assert.equal(pending.requestId, prepared.requestId);
+  assert.equal((await original.resultTool.execute({ draftId: prepared.draftId }, exec)).status, 'running');
   assert.deepEqual(reads, [prepared.requestId]);
   assert.equal((await approved.status('status?compact=1')).status, 'running');
   assert.equal((await approved.approve()).status, 200);
@@ -141,7 +147,8 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
   assert.equal(preflights, 1);
   const followup = await review(draft);
   assert.equal((await followup.approve()).status, 202);
-  const returned = await restarted.waitTool.execute({ draftId: draft.draftId, seconds: 4 }, exec);
+  const returned = await restarted.waitTool.execute({ draftId: draft.draftId, seconds: 5 }, exec);
+  assert.equal(followupReads, 2);
   assert.equal(returned.consultation.a2a.messageId, 'original-reply-2');
   assert.equal(sends[1].message.contextId, contextId);
   assert.equal(sends[1].requestId, draft.requestId);
@@ -150,7 +157,7 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
   assert.equal(view.rawResult.a2a.messageId, 'original-reply-2');
   assert.equal(sends.length, 2);
   assert.equal(preflights, 2);
-  assert.equal(reads.length, 3);
+  assert.deepEqual(reads.slice(2), [draft.requestId, draft.requestId]);
   assert.ifError(fixtureError);
 
   restarted.close();

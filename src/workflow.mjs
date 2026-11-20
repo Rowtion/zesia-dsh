@@ -124,7 +124,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     draft.recoveryCheckedAt = now();
     draft.recovery = (async () => {
       const config = await readConfiguration();
-      if (destinationOf(config) !== draft.destination || digest(config.token || '') !== draft.credentialDigest) return;
+      if (destinationOf(config) !== draft.destination || digest(config.token || '') !== draft.credentialDigest) {
+        draft.recoveryState = null;
+        return;
+      }
       const run = await recoverRequest({
         url: draft.destination, token: config.token, requestId: draft.requestId,
         signal: AbortSignal.any([AbortSignal.timeout(3500), ...(signal ? [signal] : [])]),
@@ -414,6 +417,16 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
     async execute(args,exec){const session=sessionOf(exec);return session?.snapshotEvents?continuations.inspect(session,args.consultId):{ok:false,code:'conversation_unavailable'};},
   };
+  function resultForAgent(draft) {
+    const status = browserStatus(draft);
+    if (!draft.result || status === 'running') {
+      return { ok: true, status, draftId: draft.id, requestId: draft.requestId, pending: true };
+    }
+    if (draft.result.ok) draft.receivedAt ||= new Date(now()).toISOString();
+    const { delivery, ...result } = draft.result;
+    return result;
+  }
+
   const resultTool = {
     name: 'zesia_consult_result',
     description: 'Read a saved ZESIA consultation from this conversation using its draft ID. An unknown outcome checks the original authenticated request without another consultation.',
@@ -427,14 +440,12 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       if (!draft || !['settled', 'unknown'].includes(draft.status) || !draft.result) {
         return { ok: false, errorCode: 'consult_result_unavailable' };
       }
-      if (draft.result.ok) draft.receivedAt ||= new Date(now()).toISOString();
-      const { delivery, ...result } = draft.result;
-      return result;
+      return resultForAgent(draft);
     },
   };
   const waitTool = {
     name: 'zesia_consult_wait',
-    description: 'Wait up to N seconds (1-900, default 120) for user approval in https://zesia.dev/consult and return the settled consultation result.',
+    description: 'Wait up to N seconds (1-900, default 120) for user approval and the consultation result. After a lost reply, only check the original request. If pending, continue waiting on the same draft ID.',
     timeoutMs: 905000,
     parameters: { type: 'object', additionalProperties: false, required: ['draftId'], properties: { draftId: { type: 'string' }, seconds: { type: 'integer', minimum: 1, maximum: 900 } } },
     output: { schema: { type: 'object', additionalProperties: true }, render: renderReadResult },
@@ -442,15 +453,17 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       clean();
       const draft = await findDraft(draftId, sessionOf(exec));
       if (!draft) return { ok: false, errorCode: 'consult_result_unavailable' };
-      const until = now() + seconds * 1000;
-      while (['prepared', 'sending'].includes(draft.status) && now() < until) {
-        await pause(200, undefined, { signal: exec.signal });
+      const waitMs = seconds * 1000;
+      const until = performance.now() + waitMs;
+      const signal = AbortSignal.any([AbortSignal.timeout(waitMs), ...(exec.signal ? [exec.signal] : [])]);
+      while (performance.now() < until) {
+        await recoverDraft(draft, signal);
+        const remaining = until - performance.now();
+        if (remaining <= 0 || !['prepared', 'sending', 'unknown'].includes(draft.status)) break;
+        const interval = draft.status === 'unknown' ? RECOVERY_INTERVAL : 200;
+        await pause(Math.min(remaining, interval), undefined, { signal: exec.signal });
       }
-      await recoverDraft(draft, exec.signal);
-      if (!draft.result) return { ok: true, status: draft.status, draftId, pending: true };
-      if (draft.result.ok) draft.receivedAt ||= new Date(now()).toISOString();
-      const { delivery, ...result } = draft.result;
-      return result;
+      return resultForAgent(draft);
     },
   };
   function close() {
