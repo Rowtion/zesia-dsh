@@ -5,7 +5,7 @@ import { createAdoptionTracker, ADOPTION_INSTRUCTIONS, isServiceGuidance, SERVIC
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { openOnlineBrowser, startOnlineReview } from '../node_modules/@zesia/runtime/review/online.mjs';
-import { readConfig, saveConfirmationMode } from './config.mjs';
+import { readConfig, saveBrowserActivation, saveConfirmationMode } from './config.mjs';
 import { createTransportTool } from './transport.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
@@ -60,9 +60,15 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       async inspect(id, { compact = false } = {}) {
         const current = drafts.get(id);
         if (!current) throw new Error('Draft not found.');
+        let configured = false;
+        try {
+          const config = await readConfiguration();
+          configured = typeof config?.token === 'string' && Boolean(config.token.trim());
+        } catch {}
         if (compact) {
           return {
             status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+            configured,
             agentReceivedAt: current.receivedAt || null,
             ...(current.result?.ok === false ? { result: { message: current.result.errorMessage || 'Failed.' } } : {}),
           };
@@ -72,6 +78,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
           draftId: current.id,
           requestId: current.requestId,
           status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+          configured,
           approvedHash: current.hash,
           destination: current.destination,
           packet: structuredClone(current.packet),
@@ -79,6 +86,14 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
           result: current.result,
           agentReceivedAt: current.receivedAt || null,
         };
+      },
+      async configure({ draftId, destination, token }) {
+        const current = drafts.get(draftId);
+        if (!current || current.status !== 'prepared' || now() - current.createdAt >= TTL ||
+            userTurn(current.session) !== current.turn) {
+          throw new Error('Open a current review before activating this consultation.');
+        }
+        await saveBrowserActivation({ destination, token });
       },
       async send(id, approvedHash, _confirmation) {
         const current = drafts.get(id);
