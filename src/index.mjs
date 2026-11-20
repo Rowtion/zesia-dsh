@@ -18,6 +18,7 @@ export function apply(ctx) {
   registerUiRpc(ctx, workflow, onboarding.handle);
   ctx.tools.register(workflow.tool);
   ctx.tools.register(workflow.feedbackTool);
+  ctx.tools.register(workflow.finishTool);
   ctx.tools.register(workflow.followupTool);
   ctx.tools.register(workflow.contextTool);
   ctx.tools.register(workflow.resultTool);

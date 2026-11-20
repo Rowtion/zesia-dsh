@@ -1,4 +1,5 @@
 import { captureEvidence, mergeEvidence, captureAttachments, mergeAttachments } from './evidence.mjs';
+import { DISCUSSION_ROUNDS, findingsFor, nextQuestions, prepareObjections, closingDecision } from './discussion.mjs';
 import { createContinuationStore } from './continuation.mjs';
 import { PREPARATION_INSTRUCTIONS } from './prompt.mjs';
 import { createAdoptionTracker, ADOPTION_INSTRUCTIONS, isServiceGuidance, SERVICE_GUIDANCE_NOTICE } from './adoption.mjs';
@@ -12,7 +13,9 @@ import { REVIEW_TTL_MS as TTL } from './approved-requests.mjs';
 
 const RECOVERY_INTERVAL = 2000;
 const requestIdAt = time => 'zrq-' + String(time).padStart(13, '0') + '-' + randomUUID();
-const awaitingConsultInput = result => result?.decision?.status === 'needs_clarification';
+const awaitingConsultInput = result => result?.resultSchemaVersion === 'zesia.consult.result.v2'
+  ? result.nextAction?.kind === 'supply_evidence' || result.nextAction?.kind === 'ask_user_decision'
+  : result?.decision?.status === 'needs_clarification';
 function hasReviewMaterials(context) {
   const hasMat = Array.isArray(context?.materials) && context.materials.some(material =>
     typeof material?.id === 'string' && material.id.trim() &&
@@ -26,9 +29,12 @@ const digest = value => createHash('sha256').update(JSON.stringify(value)).diges
 const userTurn = session => session.snapshotEvents().findLastIndex(event => event.type === 'user/message');
 function renderReadResult(_args, value) {
   const structured = { type: 'text', text: JSON.stringify(value) };
-  return value.ok && isServiceGuidance(value.consultation)
-    ? [{ type: 'text', text: SERVICE_GUIDANCE_NOTICE }, structured]
-    : [structured];
+  if (value.ok && isServiceGuidance(value.consultation)) return [{ type: 'text', text: SERVICE_GUIDANCE_NOTICE }, structured];
+  if (value.ok && value.verification) return [{
+    type: 'text',
+    text: 'Check the latest opinion against the cited evidence and the original user task. Use zesia_consult_followup for a material discrepancy with a quoted source or to submit answers to real questions. Otherwise record each finding using zesia_consult_finish and report the outcome in the original conversation. Review-only requests authorize inspection and a report. Seek direct user authorization before changing their work. Do not use feedback on an intermediate opinion.',
+  }, structured];
+  return [structured];
 }
 const baseValue = { advice: '', primaryExpert: '', routeStatus: 'not_sent', errorCode: '', errorMessage: '', retryAllowed: false, consultation: {}, preflight: {}, error: {} };
 const failed = (code, message) => ({ ...baseValue, ok: false, status: 'failed', draft: {}, delivery: {}, errorCode: code, errorMessage: message, error: { code, message, stage: 'preparation', outcome: 'not_started', modelCalls: 0 } });
@@ -41,13 +47,17 @@ function validatePacket(packet) {
   if (!packet || typeof packet !== 'object' || Array.isArray(packet) || Object.keys(packet).some(key => !['requester', 'project', 'brief', 'context'].includes(key)) || packet.requester !== 'DeepSeek Harness' || typeof packet.project !== 'string' || !packet.project.trim() || typeof packet.brief !== 'string' || !packet.brief.trim() || !packet.context || typeof packet.context !== 'object' || Array.isArray(packet.context)) throw new Error('Keep requester as DeepSeek Harness and supply project, brief and context.');
 }
 
-export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, recoverRequest = recoverConsult, approvedRequests, now = Date.now, onlineOrigin = process.env.ZESIA_UI_ORIGIN || 'https://zesia.dev', openBrowser = true, enableOnlineBridge = true } = {}) {
+export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, recoverRequest = recoverConsult, approvedRequests, now = Date.now, onlineOrigin = process.env.ZESIA_UI_ORIGIN || 'https://zesia.dev', openBrowser = true, enableOnlineBridge = true, enableDiscussion = true } = {}) {
   const drafts = new Map();
+  const discussions = new Map();
   const continuations = createContinuationStore(now);
   const adoption = createAdoptionTracker();
   const attempts = new WeakMap();
   const definition = createTransportTool();
   const clean = () => {
+    for (const [id, discussion] of discussions) {
+      if (now() >= discussion.binding.expiresAt) discussions.delete(id);
+    }
     for (const [id, draft] of drafts) {
       if (now() - (draft.approvedAt ?? draft.createdAt) >= TTL) {
         draft.onlineSession?.close?.();
@@ -57,6 +67,68 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   };
   const sessionOf = exec => exec.agent?.session;
   const publicDraft = draft => ({ id: draft.id, requestId: draft.requestId, hash: draft.hash, createdAt: draft.createdAt, destination: draft.destination, packet: structuredClone(draft.packet), expiresAt: new Date(draft.createdAt + TTL).toISOString(), ...(draft.onlineUrl ? { url: draft.onlineUrl } : {}), note: 'Review these materials in the shared zesia.dev/consult window. Nothing has been sent to 则灵, including preflight.' });
+
+  function discussionFor(draft) {
+    const binding = draft.discussionBinding;
+    if (!binding) return null;
+    let state = discussions.get(binding.rootRequestId);
+    if (!state) {
+      state = { binding, session: draft.session, latest: null, active: null, end: null };
+      discussions.set(binding.rootRequestId, state);
+    }
+    return state.session === draft.session ? state : null;
+  }
+
+  function trackDiscussion(draft) {
+    const state = discussionFor(draft);
+    if (!state) return;
+    const round = draft.discussionBinding.round;
+    if (draft.result?.ok && !isServiceGuidance(draft.result.consultation)
+      && draft.result.consultation?.reviewDiscussion?.round === round
+      && draft.result.consultation.reviewDiscussion.rootRequestId === state.binding.rootRequestId
+      && (!state.latest || round >= state.latest.discussionBinding.round)) state.latest = draft;
+    if (draft.status === 'unknown' || draft.status === 'sending') {
+      if (!state.latest || round > state.latest.discussionBinding.round) state.active = draft;
+    } else if (state.active === draft) {
+      state.active = null;
+    }
+  }
+
+  async function currentEnd(state) {
+    if (state.end) return state.end;
+    const persisted = await approvedRequests?.discussionEnd(state.session.id, state.binding.rootRequestId);
+    return state.end ??= persisted;
+  }
+
+  async function endDiscussion(state, end) {
+    if (state.end) return state.end;
+    state.end = end;
+    state.end = await approvedRequests?.endDiscussion(state.session.id, state.binding.rootRequestId, end) || end;
+    return state.end;
+  }
+
+  function discussionView(draft) {
+    const state = discussionFor(draft);
+    if (!state) return {};
+    const round = (state.active ?? state.latest ?? draft).discussionBinding.round;
+    return { discussion: {
+      round, maxRounds: DISCUSSION_ROUNDS,
+      state: state.end?.state ?? ({ prepared: 'awaiting_approval', unknown: 'unknown', sending: 'sending' }[state.active?.status] ?? 'verifying'),
+      inFlight: ['sending', 'unknown'].includes(state.active?.status),
+      canStop: !state.end && now() < state.binding.expiresAt &&
+        (round < DISCUSSION_ROUNDS || ['prepared', 'sending'].includes(state.active?.status)),
+    } };
+  }
+
+  function decorateResult(draft, result) {
+    if (!draft.discussionBinding || !result.ok || !result.consultation?.reviewDiscussion || isServiceGuidance(result.consultation)) return result;
+    return { ...result, verification: {
+      findings: findingsFor(result.consultation),
+      requests: nextQuestions(result.consultation),
+      rootRequestId: draft.discussionBinding.rootRequestId,
+      round: draft.discussionBinding.round, maxRounds: DISCUSSION_ROUNDS,
+    } };
+  }
 
   const browserStatus = draft => {
     if (draft.status === 'settled') return draft.result.ok ? 'completed' : draft.result.status;
@@ -74,6 +146,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     const { delivery, ...result } = draft.result || {};
     return {
       id, chatTurn, requestId, hash, createdAt, approvedAt, destination, packet, credentialDigest,
+      turn: draft.turn, discussionBinding: draft.discussionBinding,
       sessionId: draft.session.id, approvedHash: digest(packet),
       contextId: draft.continuation?.contextId, round: draft.continuation?.round,
       previousConsultId: draft.continuation?.previousConsultId,
@@ -107,6 +180,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     draft.result = record.result ? { ...record.result, delivery: draft.delivery } : unknownResult(draft);
     if (draft.result.ok) remember(session, draft.result, draft.packet, draft.continuation);
     drafts.set(draft.id, draft);
+    trackDiscussion(draft);
     return draft;
   }
 
@@ -142,10 +216,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
             (draft.continuation?.contextId && draft.continuation.contextId !== run.contextId)) return;
         const result = consultationSuccess(reply, draft.result?.preflight || {}, draft.trace || []);
         remember(draft.session, result, draft.packet, draft.continuation);
-        draft.result = {
+        draft.result = decorateResult(draft, {
           ...result, status: awaitingConsultInput(reply) ? 'awaiting_input' : 'completed',
           requestId: draft.requestId, draft: {}, delivery: draft.delivery,
-        };
+        });
       } else if (run.state === 'expired' || run.state === 'rejected') {
         draft.result = {
           ...failed(run.state === 'expired' ? 'result_expired' : run.error?.code || 'request_rejected',
@@ -156,6 +230,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         return;
       }
       draft.status = 'settled';
+      trackDiscussion(draft);
       await approvedRequests?.save(approvalRecord(draft));
     })().catch(() => { draft.recoveryState = null; }).finally(() => { draft.recovery = null; });
     return draft.recovery;
@@ -163,6 +238,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
 
   async function sendDraft(draft, packet, exec) {
     draft.status = 'sending';
+    trackDiscussion(draft);
     try {
       draft.result = await send(packet, draft.destination, 'confirmed', exec, row => {
         (draft.trace ||= []).push(row);
@@ -172,11 +248,15 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         failed('local_approval_failed', 'Could not record this approval on the device. Nothing was sent.');
     }
     draft.status = draft.result.error?.outcome === 'unknown' ? 'unknown' : 'settled';
+    trackDiscussion(draft);
     if (draft.approvedAt && draft.status === 'settled') {
       await approvedRequests?.save(approvalRecord(draft)).catch(() => {});
     }
     return draft.result;
   }
+
+  const canApproveDiscussion = draft => enableDiscussion && !draft.continuation && !draft.discussionBinding
+    && (draft.destination === 'https://api.zesia.dev' || draft.destination === 'https://zesia-consult-staging.cprindex.workers.dev');
 
   async function openOnlineBridge(draft, exec) {
     draft.onlineSession?.close?.();
@@ -184,10 +264,19 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       async inspect(id, { compact = false } = {}) {
         const current = drafts.get(id);
         if (!current) throw new Error('Draft not found.');
+        const state = discussionFor(current);
+        if (state) await currentEnd(state);
+        const followsDiscussion = state && (current.discussionBinding.round === 1 || current.status === 'settled');
+        const latest = followsDiscussion ? state.latest ?? current : current;
+        const visibleStatus = followsDiscussion && state.latest ? 'completed' : browserStatus(current);
+        const opinionId = latest.result?.consultation?.consultId;
+        const discussion = discussionView(current);
         if (compact) {
           return {
-            status: browserStatus(current),
-            agentReceivedAt: current.receivedAt || null,
+            status: visibleStatus,
+            agentReceivedAt: latest.receivedAt || null,
+            ...discussion,
+            ...(opinionId ? { opinionId } : {}),
             ...(current.result?.ok === false ? { result: { message: current.result.errorMessage || 'Failed.' } } : {}),
           };
         }
@@ -195,17 +284,20 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
           ok: true,
           draftId: current.id,
           requestId: current.requestId,
-          status: browserStatus(current),
+          status: visibleStatus,
           approvedHash: current.hash,
           destination: current.destination,
-          packet: structuredClone(current.packet),
+          packet: structuredClone(latest.packet),
           expiresAt: new Date(current.createdAt + TTL).toISOString(),
-          result: current.result ? { ...current.result, message: current.result.errorMessage } : null,
-          ...(current.result?.ok ? { rawResult: current.result.consultation } : {}),
-          agentReceivedAt: current.receivedAt || null,
+          ...(canApproveDiscussion(current) ? { discussionMaxRounds: DISCUSSION_ROUNDS } : {}),
+          ...discussion,
+          ...(opinionId ? { opinionId } : {}),
+          result: latest.result ? { ...latest.result, message: latest.result.errorMessage } : null,
+          ...(latest.result?.ok ? { rawResult: latest.result.consultation } : {}),
+          agentReceivedAt: latest.receivedAt || null,
         };
       },
-      async send(id, approvedHash, _confirmation) {
+      async send(id, approvedHash, _confirmation, options) {
         const current = drafts.get(id);
         if (!current) throw new Error('Draft not found.');
         if (current.result) return { ...current.result, cached: true };
@@ -213,16 +305,33 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if (approvedHash !== current.hash) throw new Error('Reviewed packet hash mismatch. Nothing was sent.');
         if (now() - current.createdAt >= TTL) throw new Error('This draft expired. Prepare and review again.');
         if (userTurn(current.session) !== current.turn) throw new Error('The conversation changed. Prepare a new draft.');
-        return sendDraft(current, structuredClone(current.packet), { agent: exec?.agent });
+        const packet = structuredClone(current.packet);
+        if (options?.maxRounds === DISCUSSION_ROUNDS && canApproveDiscussion(current)) {
+          current.discussionBinding = { round: 1, rootRequestId: current.requestId, expiresAt: current.createdAt + TTL };
+          packet.context.reviewDiscussion = { version: 1 };
+        }
+        return sendDraft(current, packet, { agent: exec?.agent });
       },
       async cancel(id, approvedHash) {
         const current = drafts.get(id);
         if (!current || current.status !== 'prepared' || approvedHash !== current.hash) throw new Error('Only this exact unsent draft can be cancelled.');
         current.status = 'cancelled';
         current.result = { ...baseValue, ok: false, status: 'cancelled', draft: {}, delivery: {}, errorCode: 'user_cancelled', errorMessage: 'The user cancelled. Nothing was sent.', error: { code: 'user_cancelled', modelCalls: 0 } };
+        const state = discussionFor(current);
+        if (state) await endDiscussion(state, { state: 'stopped' });
+        trackDiscussion(current);
         return current.result;
       },
-      async recover(id) { return recoverDraft(drafts.get(id)); },
+      async stopDiscussion(id, approvedHash) {
+        const current = drafts.get(id);
+        const state = discussionFor(current ?? {});
+        if (!state || current.hash !== approvedHash) throw new Error('This review cannot stop that discussion.');
+        if (!await currentEnd(state)) await endDiscussion(state, { state: 'stopped' });
+      },
+      async recover(id) {
+        const current = drafts.get(id);
+        return recoverDraft(discussionFor(current ?? {})?.active ?? current);
+      },
     };
     const session = await startOnlineReview({ runtime: bridgeRuntime, draftId: draft.id, onlineOrigin, idleMs: TTL, lifetimeMs: TTL });
     draft.onlineSession = session;
@@ -233,6 +342,9 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   async function send(packet, destination, mode, exec, onProgress = () => {}, continuation = null, draft = null) {
     onProgress({ stage: 'configuration', at: new Date(now()).toISOString() });
     const config = await readConfiguration();
+    const state = discussionFor(draft ?? {});
+    if (state && (now() >= state.binding.expiresAt || await currentEnd(state))) return failed('consult_discussion_stopped', 'The discussion has ended. Keep its previous opinion.');
+    if (draft?.previousCredentialDigest && draft.previousCredentialDigest !== digest(config.token || '')) return failed('consult_discussion_account_changed', 'The account changed after the first approval.');
     if (destinationOf(config) !== destination) return failed('destination_changed', 'The destination changed after preparation. Prepare a new consultation.');
     if (typeof config.token !== 'string' || !config.token.trim()) return failed('configuration_missing', 'Configure the 则灵 trial token first. Nothing was sent.');
     const approvedAt = mode === 'confirmed' ? now() : null;
@@ -254,17 +366,18 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     }
     const transport = createTransportTool({
       onProgress, requestId: draft?.requestId,
+      ...(state ? { beforeSend: async () => now() < state.binding.expiresAt && !await currentEnd(state) } : {}),
       readConfiguration: async () => ({ ...config, url: destination, project: packet.project }),
       ...(requestConsult ? { requestConsult } : {}), ...(preflightRequest ? { preflightRequest } : {}),
     });
     const result = await transport.execute({ brief: packet.brief, project: packet.project, context: packet.context, contextId: continuation?.contextId }, { signal: exec.signal });
     remember(sessionOf(exec), result, packet, continuation);
-    return {
+    return decorateResult(draft ?? {}, {
       ...result, status: result.ok ? (awaitingConsultInput(result.consultation) ? 'awaiting_input' : 'completed') :
         (result.error?.outcome === 'unknown' ? 'unknown' : 'failed'),
       ...(draft ? { requestId: draft.requestId } : {}),
       draft: {}, delivery,
-    };
+    });
   }
   const tool = {
     ...definition,
@@ -272,10 +385,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     parameters: { ...definition.parameters, properties: { ...definition.parameters.properties, requireMaterials: { type: 'boolean', description: 'Set true to review a document, deck or other artifact. Attach the actual excerpts in context.materials or evidenceFiles.' }, evidenceFiles: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } } }, description: 'Optional original project file excerpts copied by the plugin; auto-chunked along line boundaries into up to 16 materials of 12,000 characters. Paths must stay inside the project workspace. Never include credentials.' }, attachmentFiles: { type: 'array', maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { id: { type: 'string' }, path: { type: 'string' }, description: { type: 'string' } } }, description: 'Optional project images or documents (png, jpg, webp, gif, pdf, txt, md, json), at most 10 files and 6 MiB total. Paths must stay inside the project workspace (save temporary/compressed screenshots under .zesia/review/, never /tmp).' } } },
     output: {
       ...definition.output,
-      schema: { ...definition.output.schema, required: [...definition.output.schema.required, 'status', 'draft', 'delivery'], properties: { ...definition.output.schema.properties, status: { type: 'string' }, draftId: { type: 'string' }, requestId: { type: 'string' }, url: { type: 'string' }, browserOpened: { type: 'boolean' }, draft: { type: 'object', additionalProperties: true }, delivery: { type: 'object', additionalProperties: true } } },
+      schema: { ...definition.output.schema, required: [...definition.output.schema.required, 'status', 'draft', 'delivery'], properties: { ...definition.output.schema.properties, status: { type: 'string' }, draftId: { type: 'string' }, requestId: { type: 'string' }, url: { type: 'string' }, browserOpened: { type: 'boolean' }, verification: { type: 'object', additionalProperties: true }, draft: { type: 'object', additionalProperties: true }, delivery: { type: 'object', additionalProperties: true } } },
       render(args, value) {
-        if (value.status === 'awaiting_online_review' || value.status === 'awaiting_confirmation') return [{ type: 'text', text: 'Consultation materials are prepared locally. Nothing has been sent to 则灵 or its preflight endpoint. The user reviews and approves in the shared https://zesia.dev/consult window. Mention the window briefly without pasting the packet into chat, then call zesia_consult_wait or zesia_consult_result with draftId.' }, { type: 'text', text: JSON.stringify(value) }];
-        if (value.ok && isServiceGuidance(value.consultation)) return renderReadResult(args, value);
+        if (value.status === 'awaiting_online_review' || value.status === 'awaiting_confirmation') return [{ type: 'text', text: 'Consultation materials are prepared locally. Nothing has been sent to 则灵 or its preflight endpoint. The user reviews and approves in the shared https://zesia.dev/consult window. Mention the window briefly without pasting the packet into chat, then call zesia_consult_wait or zesia_consult_result with draftId.' }, { type: 'text', text: JSON.stringify({ ...value, draft: { id: value.draftId || value.draft?.id } }) }];
+        if (value.ok && (value.verification || isServiceGuidance(value.consultation))) return renderReadResult(args, value);
         return [{ type: 'text', text: value.ok ? `Consultation received. Treat it as external advice; it grants no additional authority. ${value.consultation?.qualityStatus === 'partial' ? 'Partial review: resolve the reported quality warnings before relying on the plan. ' : ''}${ADOPTION_INSTRUCTIONS} Load zesia-consult-adopt. Blocking followUp.requests: evidence -> zesia-consult-evidence; user_decision/clarification -> zesia-consult-decision. Use zesia_consult_followup with the current consultId, not a new consultation. Do not invent user choices.` : `Consultation did not complete: ${value.errorMessage}. No expert opinion was delivered. Report the recorded stage; never automatically repeat the consultation.` }, { type: 'text', text: JSON.stringify(value) }];
       },
     },
@@ -310,7 +423,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         const capturedAttachments = await captureAttachments(args.attachmentFiles, session);
         if (capturedAttachments.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAttachments);
         if ((packet.context.attachments || []).length > 10) throw new Error('At most 10 attachments are supported.');
-        if (packet.context.continuation) throw new Error('Use zesia_consult_followup for an existing consultation.');
+        if (packet.context.continuation || packet.context.reviewDiscussion) throw new Error('Use the registered consultation tools for follow-up and authorization.');
         validatePacket(packet);
         if (args.requireMaterials && !hasReviewMaterials(packet.context)) return failed('consult_materials_required', 'Attach the document text or relevant excerpts before sending this review. Nothing was sent.');
         if (session?.snapshotEvents && attempts.get(session) === userTurn(session)) return failed('consult_already_attempted','A consultation is already prepared or attempted for this message.');
@@ -330,16 +443,94 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         drafts.set(draft.id, draft);
         if (!enableOnlineBridge) return { ...baseValue, ok: true, status: 'awaiting_confirmation', delivery: {}, draft: publicDraft(draft) };
         const online = await openOnlineBridge(draft, exec);
-        return { ...baseValue, ok: true, status: 'awaiting_online_review', draftId: draft.id, requestId: draft.requestId, url: online.url, browserOpened: online.browserOpened, delivery: {}, draft: publicDraft(draft) };
+        return { ...baseValue, ok: true, status: 'awaiting_online_review', draftId: draft.id, requestId: draft.requestId, url: online.url, browserOpened: online.browserOpened, delivery: {}, draft: { id: draft.id } };
       } catch (error) { return failed('preparation_failed', String(error.message || 'Could not prepare consultation.')); }
     },
   };
+  async function discussionParent(session, consultId) {
+    const draft = [...drafts.values()].find(item => item.session === session && item.result?.consultation?.consultId === consultId)
+      ?? restoreDraft(await approvedRequests?.forConsultation(session.id, consultId), session);
+    if (!draft?.discussionBinding) return null;
+    const state = discussionFor(draft);
+    const saved = await approvedRequests?.latestDiscussion(session.id, state.binding.rootRequestId);
+    if (saved) restoreDraft(saved, session);
+    return { draft, state };
+  }
+
+  async function continueDiscussion(args, exec, { draft: parent, state }) {
+    const session = state.session;
+    const previous = parent.result.consultation;
+    const binding = parent.discussionBinding;
+    if (await currentEnd(state) || now() >= binding.expiresAt || binding.round >= DISCUSSION_ROUNDS) {
+      return failed('consult_discussion_stopped', 'Use the latest evidence and report any open disagreement.');
+    }
+    if (state.latest !== parent || state.active || await approvedRequests?.hasFollowup(session.id, previous.consultId)) {
+      return failed('consult_discussion_not_current', 'Use the latest opinion or recover the existing next round.');
+    }
+    const packet = structuredClone(parent.packet);
+    const materials = await captureEvidence(args.evidenceFiles, session);
+    const attachments = await captureAttachments(args.attachmentFiles, session);
+    const append = (field, added, limit) => {
+      const existing = packet.context[field] ?? [];
+      if (existing.length + added.length > limit) throw new Error('Select fewer new evidence items.');
+      if (added.some(item => existing.some(prior => prior.id === item.id))) throw new Error('That evidence is already included. Cite it without adding it again.');
+      if (added.length) packet.context[field] = [...existing, ...added];
+    };
+    append('materials', materials, 16);
+    append('attachments', attachments, 10);
+    const answers = args.answers?.length ? continuations.verify(session, previous.consultId, args.answers) : [];
+    const items = prepareObjections(packet, findingsFor(previous), args.objections);
+    if (!items.length && !answers.length) throw new Error('Cite evidence for a finding or answer an actual question.');
+    const contextId = previous.a2a?.contextId;
+    if (!contextId || previous.requestId !== parent.requestId) throw new Error('This earlier result cannot be continued.');
+    const createdAt = now(), round = binding.round + 1;
+    packet.context.reviewDiscussion = { version: 1, challenge: {
+      previousRequestId: parent.requestId, previousConsultId: previous.consultId, round,
+      ...(items.length ? { items } : {}),
+      ...(answers.length ? { answers } : {}),
+      ...(materials.length || attachments.length ? { additions: { materials: materials.length, attachments: attachments.length } } : {}),
+    } };
+    const draft = {
+      id: randomUUID(), chatTurn: session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data?.turn,
+      requestId: requestIdAt(createdAt), hash: digest(packet), createdAt,
+      session, turn: userTurn(session), destination: parent.destination, packet, status: 'prepared', result: null,
+      discussionBinding: { ...binding, round },
+      continuation: { contextId, round, previousConsultId: previous.consultId },
+      previousCredentialDigest: parent.credentialDigest,
+    };
+    if (await currentEnd(state) || state.latest !== parent || state.active) {
+      return failed('consult_discussion_not_current', 'A newer round is pending or the discussion has ended.');
+    }
+    const needsReview = answers.length || materials.length || attachments.length || draft.turn !== parent.turn;
+    if (needsReview && !enableOnlineBridge) throw new Error('Review new material in the shared browser window.');
+    state.active = draft;
+    drafts.set(draft.id, draft);
+    if (needsReview) {
+      const online = await openOnlineBridge(draft, exec).catch(error => {
+        if (state.active === draft) state.active = null;
+        drafts.delete(draft.id);
+        throw error;
+      });
+      return { ...baseValue, ok: true, status: 'awaiting_online_review', draftId: draft.id, requestId: draft.requestId,
+        url: online.url, browserOpened: online.browserOpened, delivery: {}, draft: { id: draft.id } };
+    }
+    await sendDraft(draft, packet, exec);
+    const outcome = resultForAgent(draft);
+    return outcome.ok ? outcome : { ...outcome, draftId: draft.id, requestId: draft.requestId };
+  }
+
   const followupTool = {
     name: 'zesia_consult_followup',
-    description: 'Prepare the next round of this session consultation from actual consultant requests. Load zesia-consult-evidence for observable evidence; zesia-consult-decision for user choices. Default prepares a new confirmation card; never sends without user confirmation. At most three cloud rounds, one draft/attempt per parent response, no retries. Provide only new answers; the card shows the complete accumulated context that will be sent.',
+    description: 'Continue this consultation on the same A2A context using actual evidence. For an approved discussion, pass objections with a findingId and a verbatim quote or attachment materialId. Already approved sources can be discussed within the original permission. Added files and answers require a new review in the browser. User choices need the exact user quote. At most three total rounds. After an unknown outcome, retrieve the same request. Review-only work never grants permission to change project files.',
     timeoutMs: 65000,
-    parameters: { type: 'object', additionalProperties: false, required: ['consultId','answers'], properties: {
-      consultId: {type:'string'}, answers: {type:'array',minItems:1,maxItems:3,items:{type:'object',additionalProperties:false,required:['requestId','text','sourceRef'],properties:{requestId:{type:'string'},text:{type:'string',maxLength:2000},sourceRef:{type:'string',maxLength:200},sourceQuote:{type:'string',maxLength:2000}}}}, evidenceFiles: tool.parameters.properties.evidenceFiles, attachmentFiles: tool.parameters.properties.attachmentFiles,
+    parameters: { type: 'object', additionalProperties: false, required: ['consultId'], properties: {
+      consultId: {type:'string'},
+      objections: { type: 'array', minItems: 1, maxItems: 3, items: {
+        type: 'object', additionalProperties: false, required: ['findingId'], properties: {
+          findingId: { type: 'string' }, materialId: { type: 'string', maxLength: 100 }, quote: { type: 'string', maxLength: 1200 },
+        },
+      } },
+      answers: {type:'array',minItems:1,maxItems:3,items:{type:'object',additionalProperties:false,required:['requestId','text','sourceRef'],properties:{requestId:{type:'string'},text:{type:'string',maxLength:2000},sourceRef:{type:'string',maxLength:200},sourceQuote:{type:'string',maxLength:2000}}}}, evidenceFiles: tool.parameters.properties.evidenceFiles, attachmentFiles: tool.parameters.properties.attachmentFiles,
     } },
     output: tool.output,
     async execute(args, exec) {
@@ -347,6 +538,9 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       const session=sessionOf(exec);
       if(!session?.snapshotEvents)return failed('followup_unavailable','An active conversation is required.');
       try {
+        const discussion = await discussionParent(session, args.consultId);
+        if (discussion) return await continueDiscussion(args, exec, discussion);
+        if (args.objections?.length) return failed('consult_discussion_not_approved', 'A discussion with the original approved scope is required.');
         if (typeof args?.consultId === 'string' && await approvedRequests?.hasFollowup(session.id, args.consultId)) {
           return failed('followup_unavailable', 'This response already has a follow-up attempt. Check its original result.');
         }
@@ -408,6 +602,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     if (input.action !== 'send') throw new Error('Unknown consultation control action.');
     if (userTurn(session) !== draft.turn) return failed('draft_stale', 'The conversation changed. Prepare a new draft before sending.');
     validatePacket(input.packet);
+    if (draft.discussionBinding || input.packet.context.reviewDiscussion) return failed('consult_discussion_review_required', 'Authorize this discussion in the shared online review.');
     if (draft.requireMaterials && !hasReviewMaterials(input.packet.context)) return failed('consult_materials_required', 'This review needs at least one attached excerpt. Nothing was sent.');
     const approvedContinuation=input.packet.context.continuation;
     if(draft.continuation ? approvedContinuation?.previousConsultId!==draft.continuation.previousConsultId || approvedContinuation?.round!==draft.continuation.round : Boolean(approvedContinuation)) return failed('continuation_changed','The consultation identity changed; prepare a new draft.');
@@ -470,8 +665,41 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       return resultForAgent(draft);
     },
   };
+  const finishTool = {
+    name: 'zesia_consult_finish',
+    description: 'Record the original agent’s verification of the latest opinion and finish the discussion locally. Use every stable finding ID with an evidence-based reason. Mark unresolved findings explicitly, then tell the user what was verified and what remains open. No cloud call or execution.',
+    timeoutMs: 5000,
+    parameters: { type: 'object', additionalProperties: false, required: ['consultId', 'decisions', 'summary'], properties: {
+      consultId: { type: 'string' },
+      decisions: { type: 'array', maxItems: 6, items: { type: 'object', additionalProperties: false,
+        required: ['findingId', 'status', 'reason'], properties: {
+          findingId: { type: 'string' }, status: { type: 'string', enum: ['verified', 'unresolved'] },
+          reason: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+      } },
+      summary: { type: 'string', minLength: 1, maxLength: 2000 },
+    } },
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderReadResult },
+    async execute(args, exec) {
+      const session = sessionOf(exec);
+      if (!session?.id) return failed('consult_discussion_not_current', 'Use the original session.');
+      try {
+        const found = await discussionParent(session, args.consultId);
+        if (!found || found.state.latest !== found.draft || found.state.active) {
+          return failed('consult_discussion_not_current', 'Finish only the latest opinion after any pending round settles.');
+        }
+        const existing = await currentEnd(found.state);
+        if (existing) return { ok: true, ...existing };
+        const end = closingDecision(found.draft.result.consultation, args);
+        const recorded = await endDiscussion(found.state, end);
+        return { ok: true, ...recorded };
+      } catch (error) {
+        return failed('consult_discussion_incomplete', String(error.message));
+      }
+    },
+  };
   function close() {
     for (const draft of drafts.values()) draft.onlineSession?.close?.();
   }
-  return { tool, followupTool, contextTool, resultTool, waitTool, control, close, feedbackTool: adoption.tool };
+  return { tool, followupTool, contextTool, resultTool, waitTool, finishTool, control, close, feedbackTool: adoption.tool };
 }

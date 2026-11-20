@@ -4,7 +4,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const DRAFT_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
-const FOLLOWUP_ID = /^followup-[0-9a-f]{64}$/;
+const RELATED_ID = /^(?:followup|discussion)-[0-9a-f]{64}$/;
+const discussionId = (sessionId, requestId) =>
+  'discussion-' + createHash('sha256').update(JSON.stringify([sessionId, requestId])).digest('hex');
 const followupId = (sessionId, consultId) =>
   'followup-' + createHash('sha256').update(JSON.stringify([sessionId, consultId])).digest('hex');
 export const REVIEW_TTL_MS = 24 * 60 * 60 * 1000;
@@ -16,7 +18,7 @@ export function createApprovedRequestStore({
   const path = id => join(directory, id + '.json');
 
   async function read(id) {
-    if (typeof id !== 'string' || !(DRAFT_ID.test(id) || FOLLOWUP_ID.test(id))) return null;
+    if (typeof id !== 'string' || !(DRAFT_ID.test(id) || RELATED_ID.test(id))) return null;
     let record;
     try { record = JSON.parse(await readFile(path(id), 'utf8')); }
     catch (error) {
@@ -87,6 +89,27 @@ export function createApprovedRequestStore({
         if (record.sessionId === sessionId && record.previousConsultId === consultId) return true;
       }
       return false;
+    },
+    async forConsultation(sessionId, consultId) {
+      for await (const record of scan()) {
+        if (record.sessionId === sessionId && record.result?.consultation?.consultId === consultId) return record;
+      }
+      return null;
+    },
+    async latestDiscussion(sessionId, rootRequestId) {
+      let latest = null;
+      for await (const record of scan()) {
+        if (record.sessionId === sessionId && record.discussionBinding?.rootRequestId === rootRequestId
+          && (!latest || record.discussionBinding.round > latest.discussionBinding.round)) latest = record;
+      }
+      return latest;
+    },
+    discussionEnd(sessionId, rootRequestId) { return read(discussionId(sessionId, rootRequestId)); },
+    async endDiscussion(sessionId, rootRequestId, terminal) {
+      const id = discussionId(sessionId, rootRequestId);
+      try { await store({ ...terminal, id, approvedAt: now() }, true); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      return read(id);
     },
     async clean() {
       const records = scan();

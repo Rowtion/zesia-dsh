@@ -22,6 +22,7 @@ export function createAdoptionTracker() {
       }
       const entry = sessions.get(exec.agent?.session)?.get(consultId);
       if (!entry) return { ok: false, code: 'consultation_not_in_this_session', message: 'Use the consultation result from this conversation. An A2A context ID is not a consultation ID.' };
+      if (entry.result.consultation.reviewDiscussion) return { ok: false, code: 'use_consult_finish', message: 'Use stable finding IDs with zesia_consult_finish when this discussion ends.' };
       if (entry.feedback) return { ok: true, cached: true, feedback: entry.feedback };
       const expected = ['recommendation', ...(entry.result.consultation.decision?.nextSteps || []).map((_,i) => 'step:' + i)];
       const rows = ['accepted','declined','deferred'].flatMap(key => Array.isArray(args[key]) ? args[key] : [null]);
