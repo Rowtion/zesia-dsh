@@ -195,6 +195,10 @@ test('button prompt stays short while detailed preparation rules remain in the t
   const prompt=consultationPrompt('reply-123');assert.equal(prompt, '/zesia "reply-123"');assert.match(PREPARATION_INSTRUCTIONS,/conversation language/);
   let tool;apply({skills:{register(){}},provide(){},typert:{register(){}},commands:{register(){}},tools:{register(value){if(value.name==='zesia_consult')tool=value;}}});
   assert.ok(tool.description.includes(PREPARATION_INSTRUCTIONS));assert.match(tool.description,/sourceQuote/);
+  const declared = Object.keys(tool.parameters.properties).slice(-3);
+  assert.deepEqual(declared, ['requireMaterials', 'evidenceFiles', 'attachmentFiles']);
+  assert.match(PREPARATION_INSTRUCTIONS, new RegExp('optional '+declared.slice(0, -1).join(', ')+' and '+declared.at(-1), 'u'));
+  assert.match(PREPARATION_INSTRUCTIONS, /retryAllowed=true.*specific local preparation error/u);
 });
 
 

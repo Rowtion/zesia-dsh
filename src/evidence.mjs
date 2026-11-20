@@ -35,50 +35,50 @@ async function resolveProjectFile(filePath, session) {
   return { target, name };
 }
 
-function splitLinesIntoChunks(lines, startLine, name) {
-  const chunks = [];
-  let cursor = startLine;
-  while (cursor <= startLine + lines.length - 1) {
-    const startOffset = cursor - startLine;
-    let endOffset = startOffset;
-    while (endOffset < lines.length) {
-      const candidateEnd = cursor + (endOffset - startOffset);
-      const excerpt = lines.slice(startOffset, endOffset + 1).join('');
-      const hash = createHash('sha256').update(excerpt).digest('hex');
-      const header = `Source: ${name}:${cursor}-${candidateEnd}\nExcerpt SHA-256: ${hash}\n`;
-      if (header.length + excerpt.length > MAX_MATERIAL_CHARS) {
-        if (endOffset === startOffset) {
-          const budget = Math.max(200, MAX_MATERIAL_CHARS - header.length - 20);
-          const clipped = excerpt.slice(0, budget);
-          const clippedHash = createHash('sha256').update(clipped).digest('hex');
-          const content = `Source: ${name}:${cursor}-${candidateEnd}\nExcerpt SHA-256: ${clippedHash}\n${clipped}`;
-          const identity = createHash('sha256').update(`${name}:${cursor}-${candidateEnd}\n${clipped}`).digest('hex');
-          chunks.push({ id: `file-${identity.slice(0, 20)}`, content });
-          cursor = candidateEnd + 1;
-          break;
-        }
-        const fitEnd = cursor + (endOffset - startOffset) - 1;
-        const fitExcerpt = lines.slice(startOffset, endOffset).join('');
-        const fitHash = createHash('sha256').update(fitExcerpt).digest('hex');
-        const content = `Source: ${name}:${cursor}-${fitEnd}\nExcerpt SHA-256: ${fitHash}\n${fitExcerpt}`;
-        const identity = createHash('sha256').update(`${name}:${cursor}-${fitEnd}\n${fitExcerpt}`).digest('hex');
-        chunks.push({ id: `file-${identity.slice(0, 20)}`, content });
-        cursor = fitEnd + 1;
-        break;
-      }
-      endOffset += 1;
+function excerptBudget(source) {
+  const headerLength = `Source: ${source}\nExcerpt SHA-256: `.length + 65; // Digest and newline.
+  const budget = MAX_MATERIAL_CHARS - headerLength;
+  if (budget < 2) throw new Error('The source label is too long. Choose a shorter project path.');
+  return budget;
+}
+
+function evidenceChunk(source, excerpt) {
+  const hash = createHash('sha256').update(excerpt).digest('hex');
+  const identity = createHash('sha256').update(`${source}\n${excerpt}`).digest('hex');
+  const content = `Source: ${source}\nExcerpt SHA-256: ${hash}\n${excerpt}`;
+  return { id: `file-${identity.slice(0, 20)}`, content };
+}
+
+function* splitLinesIntoChunks(lines, startLine, name) {
+  let first = startLine;
+  let excerpt = '';
+  for (const [index, line] of lines.entries()) {
+    const last = startLine + index;
+    if (excerpt.length + line.length <= excerptBudget(`${name}:${first}-${last}`)) {
+      excerpt += line;
+      continue;
     }
-    if (endOffset === lines.length) {
-      const fitEnd = startLine + lines.length - 1;
-      const fitExcerpt = lines.slice(startOffset).join('');
-      const fitHash = createHash('sha256').update(fitExcerpt).digest('hex');
-      const content = `Source: ${name}:${cursor}-${fitEnd}\nExcerpt SHA-256: ${fitHash}\n${fitExcerpt}`;
-      const identity = createHash('sha256').update(`${name}:${cursor}-${fitEnd}\n${fitExcerpt}`).digest('hex');
-      chunks.push({ id: `file-${identity.slice(0, 20)}`, content });
-      break;
+    if (excerpt) yield evidenceChunk(`${name}:${first}-${last - 1}`, excerpt);
+    first = last;
+    const label = `${name}:${last}-${last}`;
+    if (line.length <= excerptBudget(label)) {
+      excerpt = line;
+      continue;
     }
+
+    let offset = 0;
+    for (let part = 1; offset < line.length; part++) {
+      const source = `${label} (part ${part})`;
+      let end = Math.min(offset + excerptBudget(source), line.length);
+      const lastCodeUnit = line.charCodeAt(end - 1);
+      if (end < line.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end--;
+      yield evidenceChunk(source, line.slice(offset, end));
+      offset = end;
+    }
+    first = last + 1;
+    excerpt = '';
   }
-  return chunks;
+  if (excerpt) yield evidenceChunk(`${name}:${first}-${startLine + lines.length - 1}`, excerpt);
 }
 
 export async function captureEvidence(files = [], session) {

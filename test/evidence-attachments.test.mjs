@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,4 +37,24 @@ test('dsh captures image attachmentFiles and rejects unsupported formats', async
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('oversized source lines retain every character in bounded, distinct chunks', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zesia-dsh-long-line-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const source = '/* intro */\n' + '🧪'.repeat(13500) + '\n/* tail */';
+  fs.writeFileSync(path.join(dir, 'long.css'), source);
+  const chunks = await captureEvidence([{ path: 'long.css' }], { header: { cwd: dir } });
+  assert.ok(chunks.length > 2);
+  assert.equal(new Set(chunks.map(chunk => chunk.id)).size, chunks.length);
+  const excerpts = chunks.map(({ content }) => {
+    const match = /^Source: [^\n]+\nExcerpt SHA-256: ([a-f0-9]{64})\n/u.exec(content);
+    assert.ok(match);
+    assert.ok(content.length <= 12000);
+    const original = content.slice(match[0].length);
+    assert.equal(original.isWellFormed(), true);
+    assert.equal(match[1], createHash('sha256').update(original).digest('hex'));
+    return original;
+  });
+  assert.equal(excerpts.join(''), source);
 });
