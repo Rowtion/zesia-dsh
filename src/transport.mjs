@@ -2,7 +2,14 @@ import { ADOPTION_INSTRUCTIONS, isServiceGuidance, SERVICE_GUIDANCE_NOTICE } fro
 import { basename } from 'node:path';
 import { consultOverA2A, preflightConsult } from './a2a-client.mjs';
 import { readConfig } from './config.mjs';
-export function createTransportTool({ readConfiguration = readConfig, requestConsult = consultOverA2A, preflightRequest = preflightConsult, onProgress = () => {} } = {}) {
+export function consultationSuccess(consultation, preflight, trace) {
+  return {
+    ok: true, trace, advice: consultation.advice, primaryExpert: consultation.routing?.selection?.primaryExpert || 'general',
+    routeStatus: consultation.routing?.status || 'unknown', errorCode: '', errorMessage: '',
+    retryAllowed: false, consultation, preflight, error: {},
+  };
+}
+export function createTransportTool({ readConfiguration = readConfig, requestConsult = consultOverA2A, preflightRequest = preflightConsult, onProgress = () => {}, requestId } = {}) {
   const failure = (code, message, error = {}, preflight = {}) => ({ ok: false, advice: '', primaryExpert: '', routeStatus: 'not_completed', errorCode: code, errorMessage: message, retryAllowed: false, consultation: {}, preflight, error: { code, message, retryAllowed: false, stage: 'preparation', outcome: 'not_started', modelCalls: null, ...error } });
   return {
     name: 'zesia_consult',
@@ -57,9 +64,12 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
           return { trace, ...failure(issue.code, detailMsg, { ...issue, stage: 'preflight', hint: issue.hint, modelCalls: 0, contentModified: false }, preflight) };
         }
         progress('cloud_consultation');
-        const result = await requestConsult({ url: config.url, token: config.token, input, contextId: args.contextId, signal, onStage: progress });
+        const result = await requestConsult({
+          url: config.url, token: config.token, input, contextId: args.contextId, signal, onStage: progress,
+          ...(requestId ? { requestId, clientRequestId: requestId } : {}),
+        });
         progress('result_received');
-        return { ok: true, trace, advice: result.advice, primaryExpert: result.routing?.selection?.primaryExpert || 'general', routeStatus: result.routing?.status || 'unknown', errorCode: '', errorMessage: '', retryAllowed: false, consultation: result, preflight, error: {} };
+        return consultationSuccess(result, preflight, trace);
       } catch (error) {
         let structured;
         try { structured = error.failure || JSON.parse(error.metadata?.failure || 'null'); } catch {}

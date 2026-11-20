@@ -3,6 +3,7 @@ import { consultationPrompt } from './prompt.mjs';
 import { registerConsultSkills } from './skills.mjs';
 import { createOnboarding } from './onboarding.mjs';
 import { registerUiRpc } from './ui-rpc.mjs';
+import { createApprovedRequestStore } from './approved-requests.mjs';
 import { createConsultWorkflow } from './workflow.mjs';
 export { createConsultWorkflow } from './workflow.mjs';
 export { createTransportTool as createConsultTool } from './transport.mjs';
@@ -10,7 +11,9 @@ export const name = 'zesia-consult';
 export const inject = ['tools', 'commands', 'typert', 'skills'];
 export function apply(ctx) {
   registerConsultSkills(ctx);
-  const workflow = createConsultWorkflow();
+  const approvedRequests = createApprovedRequestStore();
+  const workflow = createConsultWorkflow({ approvedRequests });
+  void approvedRequests.clean().catch(() => {});
   const onboarding = createOnboarding();
   registerUiRpc(ctx, workflow, onboarding.handle);
   ctx.tools.register(workflow.tool);

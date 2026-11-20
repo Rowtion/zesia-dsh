@@ -35,6 +35,10 @@ A trial token is required for cloud consultation. Run `node <plugin-directory>/c
 
 The bundled preparation, evidence, decision and adoption Skills guide the original agent. Registration does not guarantee that a model follows every instruction. Follow-ups carry a reviewed context snapshot; unknown send outcomes are never retried automatically. Advice does not authorize additional execution.
 
+After approving a request, reopen its card in the original DSH conversation to check an unknown outcome. The card uses the same request ID even after a DSH restart. It reads from the original service with the original credential. The service's saved result may expire within 24 hours.
+
+The plugin keeps the approved packet, request reference and any settled result in private local state for this recovery path. The default directory is \`~/.local/state/zesia/dsh/approved-consults\`. Records expire 24 hours after approval and are removed by the plugin on startup or when accessed. A restarted host recovers through the DSH conversation card or the agent's result tool. Its previous browser connection has ended.
+
 ## Develop
 
 ```sh

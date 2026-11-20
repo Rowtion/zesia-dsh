@@ -6,9 +6,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { openOnlineBrowser, startOnlineReview } from '../node_modules/@zesia/runtime/review/online.mjs';
 import { readConfig, saveConfirmationMode } from './config.mjs';
-import { createTransportTool } from './transport.mjs';
+import { createTransportTool, consultationSuccess } from './transport.mjs';
+import { recoverConsult } from './a2a-client.mjs';
+import { REVIEW_TTL_MS as TTL } from './approved-requests.mjs';
 
-const TTL = 24 * 60 * 60 * 1000;
+const RECOVERY_INTERVAL = 2000;
+const requestIdAt = time => 'zrq-' + String(time).padStart(13, '0') + '-' + randomUUID();
+const awaitingConsultInput = result => result?.decision?.status === 'needs_clarification';
 function hasReviewMaterials(context) {
   const hasMat = Array.isArray(context?.materials) && context.materials.some(material =>
     typeof material?.id === 'string' && material.id.trim() &&
@@ -37,7 +41,7 @@ function validatePacket(packet) {
   if (!packet || typeof packet !== 'object' || Array.isArray(packet) || Object.keys(packet).some(key => !['requester', 'project', 'brief', 'context'].includes(key)) || packet.requester !== 'DeepSeek Harness' || typeof packet.project !== 'string' || !packet.project.trim() || typeof packet.brief !== 'string' || !packet.brief.trim() || !packet.context || typeof packet.context !== 'object' || Array.isArray(packet.context)) throw new Error('Keep requester as DeepSeek Harness and supply project, brief and context.');
 }
 
-export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, now = Date.now, onlineOrigin = process.env.ZESIA_UI_ORIGIN || 'https://zesia.dev', openBrowser = true, enableOnlineBridge = true } = {}) {
+export function createConsultWorkflow({ readConfiguration = () => readConfig(process.env, { requireToken: false }), saveMode = saveConfirmationMode, requestConsult, preflightRequest, recoverRequest = recoverConsult, approvedRequests, now = Date.now, onlineOrigin = process.env.ZESIA_UI_ORIGIN || 'https://zesia.dev', openBrowser = true, enableOnlineBridge = true } = {}) {
   const drafts = new Map();
   const continuations = createContinuationStore(now);
   const adoption = createAdoptionTracker();
@@ -45,7 +49,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   const definition = createTransportTool();
   const clean = () => {
     for (const [id, draft] of drafts) {
-      if (now() - draft.createdAt > TTL) {
+      if (now() - (draft.approvedAt ?? draft.createdAt) >= TTL) {
         draft.onlineSession?.close?.();
         drafts.delete(id);
       }
@@ -53,6 +57,126 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   };
   const sessionOf = exec => exec.agent?.session;
   const publicDraft = draft => ({ id: draft.id, requestId: draft.requestId, hash: draft.hash, createdAt: draft.createdAt, destination: draft.destination, packet: structuredClone(draft.packet), expiresAt: new Date(draft.createdAt + TTL).toISOString(), ...(draft.onlineUrl ? { url: draft.onlineUrl } : {}), note: 'Review these materials in the shared zesia.dev/consult window. Nothing has been sent to 则灵, including preflight.' });
+
+  const browserStatus = draft => {
+    if (draft.status === 'settled') return draft.result.ok ? 'completed' : draft.result.status;
+    if (draft.status === 'unknown' && draft.recoveryState === 'running') return 'running';
+    return draft.status;
+  };
+  const unknownResult = draft => ({
+    ...failed('outcome_unknown', 'Check the saved result for this request. Do not send it again.'),
+    status: 'unknown', requestId: draft.requestId,
+    error: { code: 'outcome_unknown', stage: 'recovery', outcome: 'unknown', modelCalls: null, retryAllowed: false },
+  });
+
+  function approvalRecord(draft) {
+    const { id, chatTurn, requestId, hash, createdAt, approvedAt, destination, packet, credentialDigest } = draft;
+    const { delivery, ...result } = draft.result || {};
+    return {
+      id, chatTurn, requestId, hash, createdAt, approvedAt, destination, packet, credentialDigest,
+      sessionId: draft.session.id, approvedHash: digest(packet),
+      contextId: draft.continuation?.contextId, round: draft.continuation?.round,
+      previousConsultId: draft.continuation?.previousConsultId,
+      ...(draft.status === 'settled' ? { result } : {}),
+    };
+  }
+
+  function deliveryFor(packet, destination, mode, approvedAt) {
+    return {
+      mode, destination, payloadSha256: digest(packet),
+      approvedAt: approvedAt == null ? null : new Date(approvedAt).toISOString(),
+      packet: structuredClone(packet),
+    };
+  }
+
+  function remember(session, result, packet, continuation) {
+    adoption.remember(session, result);
+    if (!isServiceGuidance(result.consultation)) continuations.remember(session, result, packet, continuation?.round || 1);
+  }
+
+  function restoreDraft(record, session) {
+    if (!record) return null;
+    const found = drafts.get(record.id);
+    if (found) return found.session === session ? found : null;
+    if (record.sessionId !== session.id || digest(record.packet) !== record.approvedHash) return null;
+    const draft = {
+      ...record, session, status: record.result ? 'settled' : 'unknown',
+      continuation: { contextId: record.contextId, round: record.round, previousConsultId: record.previousConsultId },
+      delivery: deliveryFor(record.packet, record.destination, 'confirmed', record.approvedAt),
+    };
+    draft.result = record.result ? { ...record.result, delivery: draft.delivery } : unknownResult(draft);
+    if (draft.result.ok) remember(session, draft.result, draft.packet, draft.continuation);
+    drafts.set(draft.id, draft);
+    return draft;
+  }
+
+  async function findDraft(id, session) {
+    if (!session?.id) return null;
+    const found = drafts.get(id);
+    if (found) return found.session === session ? found : null;
+    return restoreDraft(await approvedRequests?.get(id, session.id), session);
+  }
+
+  async function recoverDraft(draft, signal) {
+    if (draft?.status !== 'unknown' || !draft.credentialDigest) return;
+    if (draft.recovery) return draft.recovery;
+    if (draft.recoveryCheckedAt != null && now() - draft.recoveryCheckedAt < RECOVERY_INTERVAL) return;
+    draft.recoveryCheckedAt = now();
+    draft.recovery = (async () => {
+      const config = await readConfiguration();
+      if (destinationOf(config) !== draft.destination || digest(config.token || '') !== draft.credentialDigest) {
+        draft.recoveryState = null;
+        return;
+      }
+      const run = await recoverRequest({
+        url: draft.destination, token: config.token, requestId: draft.requestId,
+        signal: AbortSignal.any([AbortSignal.timeout(3500), ...(signal ? [signal] : [])]),
+      });
+      if (run.requestId !== draft.requestId) return;
+      draft.recoveryState = run.state;
+      if (run.state === 'completed') {
+        const reply = run.result;
+        if (reply?.format !== 'zesia.consult.v0' || typeof reply.advice !== 'string' ||
+            reply.requestId !== draft.requestId || !reply.a2a?.messageId ||
+            !run.contextId || run.contextId !== reply.a2a.contextId ||
+            (draft.continuation?.contextId && draft.continuation.contextId !== run.contextId)) return;
+        const result = consultationSuccess(reply, draft.result?.preflight || {}, draft.trace || []);
+        remember(draft.session, result, draft.packet, draft.continuation);
+        draft.result = {
+          ...result, status: awaitingConsultInput(reply) ? 'awaiting_input' : 'completed',
+          requestId: draft.requestId, draft: {}, delivery: draft.delivery,
+        };
+      } else if (run.state === 'expired' || run.state === 'rejected') {
+        draft.result = {
+          ...failed(run.state === 'expired' ? 'result_expired' : run.error?.code || 'request_rejected',
+            run.state === 'expired' ? 'The saved result expired.' : run.error?.message || 'This request was not admitted.'),
+          requestId: draft.requestId, status: run.state === 'expired' ? 'expired' : 'failed',
+        };
+      } else {
+        return;
+      }
+      draft.status = 'settled';
+      await approvedRequests?.save(approvalRecord(draft));
+    })().catch(() => { draft.recoveryState = null; }).finally(() => { draft.recovery = null; });
+    return draft.recovery;
+  }
+
+  async function sendDraft(draft, packet, exec) {
+    draft.status = 'sending';
+    try {
+      draft.result = await send(packet, draft.destination, 'confirmed', exec, row => {
+        (draft.trace ||= []).push(row);
+      }, draft.continuation, draft);
+    } catch {
+      draft.result = draft.approvedAt ? unknownResult(draft) :
+        failed('local_approval_failed', 'Could not record this approval on the device. Nothing was sent.');
+    }
+    draft.status = draft.result.error?.outcome === 'unknown' ? 'unknown' : 'settled';
+    if (draft.approvedAt && draft.status === 'settled') {
+      await approvedRequests?.save(approvalRecord(draft)).catch(() => {});
+    }
+    return draft.result;
+  }
 
   async function openOnlineBridge(draft, exec) {
     draft.onlineSession?.close?.();
@@ -62,7 +186,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if (!current) throw new Error('Draft not found.');
         if (compact) {
           return {
-            status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+            status: browserStatus(current),
             agentReceivedAt: current.receivedAt || null,
             ...(current.result?.ok === false ? { result: { message: current.result.errorMessage || 'Failed.' } } : {}),
           };
@@ -71,12 +195,13 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
           ok: true,
           draftId: current.id,
           requestId: current.requestId,
-          status: current.status === 'settled' ? (current.result?.ok ? 'completed' : 'failed') : current.status,
+          status: browserStatus(current),
           approvedHash: current.hash,
           destination: current.destination,
           packet: structuredClone(current.packet),
           expiresAt: new Date(current.createdAt + TTL).toISOString(),
-          result: current.result,
+          result: current.result ? { ...current.result, message: current.result.errorMessage } : null,
+          ...(current.result?.ok ? { rawResult: current.result.consultation } : {}),
           agentReceivedAt: current.receivedAt || null,
         };
       },
@@ -86,16 +211,9 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if (current.result) return { ...current.result, cached: true };
         if (current.status !== 'prepared') throw new Error('This draft is already being sent or was cancelled.');
         if (approvedHash !== current.hash) throw new Error('Reviewed packet hash mismatch. Nothing was sent.');
-        if (now() - current.createdAt > TTL) throw new Error('This draft expired. Prepare and review again.');
+        if (now() - current.createdAt >= TTL) throw new Error('This draft expired. Prepare and review again.');
         if (userTurn(current.session) !== current.turn) throw new Error('The conversation changed. Prepare a new draft.');
-        current.status = 'sending';
-        try {
-          current.result = await send(structuredClone(current.packet), current.destination, 'confirmed', { agent: exec?.agent }, row => { (current.trace ||= []).push(row); }, current.continuation);
-        } catch (error) {
-          current.result = failed('send_failed', String(error.message || 'Sending did not complete.'));
-        }
-        current.status = 'settled';
-        return current.result;
+        return sendDraft(current, structuredClone(current.packet), { agent: exec?.agent });
       },
       async cancel(id, approvedHash) {
         const current = drafts.get(id);
@@ -104,7 +222,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         current.result = { ...baseValue, ok: false, status: 'cancelled', draft: {}, delivery: {}, errorCode: 'user_cancelled', errorMessage: 'The user cancelled. Nothing was sent.', error: { code: 'user_cancelled', modelCalls: 0 } };
         return current.result;
       },
-      async recover() { return null; },
+      async recover(id) { return recoverDraft(drafts.get(id)); },
     };
     const session = await startOnlineReview({ runtime: bridgeRuntime, draftId: draft.id, onlineOrigin, idleMs: TTL, lifetimeMs: TTL });
     draft.onlineSession = session;
@@ -112,18 +230,41 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     draft.browserOpened = openBrowser ? await openOnlineBrowser(session.url) : false;
     return { url: session.url, browserOpened: draft.browserOpened };
   }
-  async function send(packet, destination, mode, exec, onProgress = () => {}, continuation = null) {
+  async function send(packet, destination, mode, exec, onProgress = () => {}, continuation = null, draft = null) {
     onProgress({ stage: 'configuration', at: new Date(now()).toISOString() });
     const config = await readConfiguration();
     if (destinationOf(config) !== destination) return failed('destination_changed', 'The destination changed after preparation. Prepare a new consultation.');
     if (typeof config.token !== 'string' || !config.token.trim()) return failed('configuration_missing', 'Configure the 则灵 trial token first. Nothing was sent.');
-    const payloadSha256 = digest(packet);
-    const delivery = { mode, destination, payloadSha256, approvedAt: mode === 'confirmed' ? new Date(now()).toISOString() : null, packet: structuredClone(packet) };
-    const transport = createTransportTool({ onProgress, readConfiguration: async () => ({ ...config, url: destination, project: packet.project }), ...(requestConsult ? { requestConsult } : {}), ...(preflightRequest ? { preflightRequest } : {}) });
+    const approvedAt = mode === 'confirmed' ? now() : null;
+    const delivery = deliveryFor(packet, destination, mode, approvedAt);
+    if (draft) {
+      draft.packet = packet;
+      draft.delivery = delivery;
+      draft.credentialDigest = digest(config.token);
+      draft.approvedAt = approvedAt;
+      try { await approvedRequests?.claim(approvalRecord(draft)); }
+      catch {
+        draft.approvedAt = null;
+        return failed('local_approval_failed', 'Could not record this approval on the device. Nothing was sent by this attempt.');
+      }
+    }
+    if (!draft && continuation?.previousConsultId) {
+      try { await approvedRequests?.claimFollowup(sessionOf(exec).id, continuation.previousConsultId); }
+      catch { return failed('followup_unavailable', 'Could not reserve this follow-up. Check its existing result before continuing.'); }
+    }
+    const transport = createTransportTool({
+      onProgress, requestId: draft?.requestId,
+      readConfiguration: async () => ({ ...config, url: destination, project: packet.project }),
+      ...(requestConsult ? { requestConsult } : {}), ...(preflightRequest ? { preflightRequest } : {}),
+    });
     const result = await transport.execute({ brief: packet.brief, project: packet.project, context: packet.context, contextId: continuation?.contextId }, { signal: exec.signal });
-    adoption.remember(sessionOf(exec), result);
-    if (!isServiceGuidance(result.consultation)) continuations.remember(sessionOf(exec), result, packet, continuation?.round || 1);
-    return { ...result, status: result.ok ? (result.consultation?.decision?.status === 'needs_clarification' ? 'awaiting_input' : 'completed') : 'failed', draft: {}, delivery };
+    remember(sessionOf(exec), result, packet, continuation);
+    return {
+      ...result, status: result.ok ? (awaitingConsultInput(result.consultation) ? 'awaiting_input' : 'completed') :
+        (result.error?.outcome === 'unknown' ? 'unknown' : 'failed'),
+      ...(draft ? { requestId: draft.requestId } : {}),
+      draft: {}, delivery,
+    };
   }
   const tool = {
     ...definition,
@@ -176,10 +317,16 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if (session?.snapshotEvents) attempts.set(session, userTurn(session));
         if (config.confirmBeforeSend === false) return await send(packet, destination, 'automatic', exec);
         if (!session?.snapshotEvents || !session.id) return failed('confirmation_unavailable', 'An active dsh conversation is required to prepare a confirmation card. No data was sent.');
-        for (const [id, existing] of drafts) if (existing.session === session) drafts.delete(id);
+        for (const [id, existing] of drafts) {
+          if (existing.session === session && !['sending', 'unknown'].includes(existing.status)) {
+            existing.onlineSession?.close?.();
+            drafts.delete(id);
+          }
+        }
         if (drafts.size >= 100) drafts.delete(drafts.keys().next().value);
         const chatTurn = session.snapshotEvents().findLast(event => event.type === 'turn/start')?.data?.turn;
-        const draft = { chatTurn, id: randomUUID(), requestId: randomUUID(), hash: digest(packet), createdAt: now(), session, turn: userTurn(session), destination, packet, requireMaterials: args.requireMaterials === true, status: 'prepared', result: null };
+        const createdAt = now();
+        const draft = { chatTurn, id: randomUUID(), requestId: requestIdAt(createdAt), hash: digest(packet), createdAt, session, turn: userTurn(session), destination, packet, requireMaterials: args.requireMaterials === true, status: 'prepared', result: null };
         drafts.set(draft.id, draft);
         if (!enableOnlineBridge) return { ...baseValue, ok: true, status: 'awaiting_confirmation', delivery: {}, draft: publicDraft(draft) };
         const online = await openOnlineBridge(draft, exec);
@@ -200,6 +347,9 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       const session=sessionOf(exec);
       if(!session?.snapshotEvents)return failed('followup_unavailable','An active conversation is required.');
       try {
+        if (typeof args?.consultId === 'string' && await approvedRequests?.hasFollowup(session.id, args.consultId)) {
+          return failed('followup_unavailable', 'This response already has a follow-up attempt. Check its original result.');
+        }
         const continuation=continuations.prepare(session,args);
         const packet=continuation.packet;
         const captured=await captureEvidence(args.evidenceFiles,session);
@@ -216,7 +366,8 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         if(config.confirmBeforeSend===false)return await send(packet,destination,'automatic',exec,()=>{},continuation);
         if(drafts.size>=100)drafts.delete(drafts.keys().next().value);
         const chatTurn=session.snapshotEvents().findLast(e=>e.type==='turn/start')?.data?.turn;
-        const draft={chatTurn,id:randomUUID(),requestId:randomUUID(),hash:digest(packet),createdAt:now(),session,turn:userTurn(session),destination,packet,status:'prepared',result:null,continuation};
+        const createdAt = now();
+        const draft={chatTurn,id:randomUUID(),requestId:requestIdAt(createdAt),hash:digest(packet),createdAt,session,turn:userTurn(session),destination,packet,status:'prepared',result:null,continuation};
         drafts.set(draft.id,draft);
         if(!enableOnlineBridge)return {...baseValue,ok:true,status:'awaiting_confirmation',delivery:{},draft:publicDraft(draft)};
         const online=await openOnlineBridge(draft,exec);
@@ -237,12 +388,16 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     const session = sessionOf(exec);
     if (input.action === 'draft_for_turn') {
       if (!session || !['string', 'number'].includes(typeof input.turn)) return { draft: null };
-      const found = [...drafts.values()].findLast(draft => draft.session === session && draft.chatTurn === input.turn);
+      const found = [...drafts.values()].findLast(draft => draft.session === session && draft.chatTurn === input.turn) ||
+        restoreDraft(await approvedRequests?.forTurn(session.id, input.turn), session);
       return found ? { draft: publicDraft(found), status: found.status, result: found.result, trace: found.trace || [], feedback: adoption.get(session, found.result?.consultation?.consultId) } : { draft: null };
     }
-    const draft = drafts.get(input.draftId);
-    if (!draft || draft.session !== session || draft.hash !== input.draftHash) return failed('draft_unavailable', 'This draft expired, belongs to another conversation, or the host restarted. Prepare it again.');
-    if (input.action === 'status') return { status: draft.status, result: draft.result, trace: draft.trace || [], feedback: adoption.get(session, draft.result?.consultation?.consultId) };
+    const draft = await findDraft(input.draftId, session);
+    if (!draft || draft.session !== session || draft.hash !== input.draftHash) return failed('draft_unavailable', 'This draft expired or is unavailable in this conversation. Check the existing request before preparing another.');
+    if (input.action === 'status') {
+      await recoverDraft(draft, exec.signal);
+      return { status: draft.status, result: draft.result, trace: draft.trace || [], feedback: adoption.get(session, draft.result?.consultation?.consultId) };
+    }
     if (draft.result) return { ...draft.result, cached: true };
     if (draft.status !== 'prepared') return failed('draft_already_used', 'This draft is already being sent or was cancelled. It will not be sent twice.');
     if (input.action === 'cancel') {
@@ -258,11 +413,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     if(draft.continuation ? approvedContinuation?.previousConsultId!==draft.continuation.previousConsultId || approvedContinuation?.round!==draft.continuation.round : Boolean(approvedContinuation)) return failed('continuation_changed','The consultation identity changed; prepare a new draft.');
     if(draft.continuation) { try { const checked=continuations.verify(session,draft.continuation.previousConsultId,approvedContinuation.answers);if(checked.some((a,i)=>a.question!==approvedContinuation.answers[i].question))throw new Error('The consultant question changed.'); } catch(error){return failed('decision_unverified',error.message);} }
     if (digest(input.packet) !== input.approvedHash) return failed('preview_changed', 'The confirmed packet did not match the reviewed content. Nothing was sent.');
-    draft.status = 'sending';
-    try { draft.result = await send(structuredClone(input.packet), draft.destination, 'confirmed', exec, row => { (draft.trace ||= []).push(row); }, draft.continuation); }
-    catch (error) { draft.result = failed('send_failed', String(error.message || 'Sending did not complete.')); draft.result.error.modelCalls = null; draft.result.error.stage = draft.trace?.at(-1)?.stage || 'configuration'; draft.result.error.outcome = draft.result.error.stage === 'configuration' ? 'not_started' : 'unknown'; if (draft.result.error.outcome === 'not_started') draft.result.error.modelCalls = 0; }
-    draft.status = 'settled';
-    return draft.result;
+    return sendDraft(draft, structuredClone(input.packet), exec);
   }
   const contextTool={
     name:'zesia_consult_context',description:'Read only the current session consultation requests, round limit and references to recent actual user messages for decision attribution. Local only: no cloud call, approval, preference change or execution. This reports references, not a semantic verification of user intent.',timeoutMs:5000,
@@ -270,41 +421,53 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
     output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
     async execute(args,exec){const session=sessionOf(exec);return session?.snapshotEvents?continuations.inspect(session,args.consultId):{ok:false,code:'conversation_unavailable'};},
   };
+  function resultForAgent(draft) {
+    const status = browserStatus(draft);
+    if (!draft.result || status === 'running') {
+      return { ok: true, status, draftId: draft.id, requestId: draft.requestId, pending: true };
+    }
+    if (draft.result.ok) draft.receivedAt ||= new Date(now()).toISOString();
+    const { delivery, ...result } = draft.result;
+    return result;
+  }
+
   const resultTool = {
     name: 'zesia_consult_result',
-    description: 'Read a settled ZESIA consultation from this conversation using its draft ID. Reads locally without sending a consultation.',
+    description: 'Read a saved ZESIA consultation from this conversation using its draft ID. An unknown outcome checks the original authenticated request without another consultation.',
     timeoutMs: 5000,
     parameters: { type: 'object', additionalProperties: false, required: ['draftId'], properties: { draftId: { type: 'string' } } },
     output: { schema: { type: 'object', additionalProperties: true }, render: renderReadResult },
     async execute({ draftId }, exec) {
       clean();
-      const draft = drafts.get(draftId);
-      if (!draft || draft.session !== sessionOf(exec) || draft.status !== 'settled' || !draft.result) {
+      const draft = await findDraft(draftId, sessionOf(exec));
+      await recoverDraft(draft, exec.signal);
+      if (!draft || !['settled', 'unknown'].includes(draft.status) || !draft.result) {
         return { ok: false, errorCode: 'consult_result_unavailable' };
       }
-      draft.receivedAt ||= new Date(now()).toISOString();
-      const { delivery, ...result } = draft.result;
-      return result;
+      return resultForAgent(draft);
     },
   };
   const waitTool = {
     name: 'zesia_consult_wait',
-    description: 'Wait up to N seconds (1-900, default 120) for user approval in https://zesia.dev/consult and return the settled consultation result.',
+    description: 'Wait up to N seconds (1-900, default 120) for user approval and the consultation result. After a lost reply, only check the original request. If pending, continue waiting on the same draft ID.',
     timeoutMs: 905000,
     parameters: { type: 'object', additionalProperties: false, required: ['draftId'], properties: { draftId: { type: 'string' }, seconds: { type: 'integer', minimum: 1, maximum: 900 } } },
     output: { schema: { type: 'object', additionalProperties: true }, render: renderReadResult },
     async execute({ draftId, seconds = 120 }, exec) {
       clean();
-      const draft = drafts.get(draftId);
-      if (!draft || draft.session !== sessionOf(exec)) return { ok: false, errorCode: 'consult_result_unavailable' };
-      const until = now() + seconds * 1000;
-      while (draft.status !== 'settled' && draft.status !== 'cancelled' && now() < until) {
-        await pause(200);
+      const draft = await findDraft(draftId, sessionOf(exec));
+      if (!draft) return { ok: false, errorCode: 'consult_result_unavailable' };
+      const waitMs = seconds * 1000;
+      const until = performance.now() + waitMs;
+      const signal = AbortSignal.any([AbortSignal.timeout(waitMs), ...(exec.signal ? [exec.signal] : [])]);
+      while (performance.now() < until) {
+        await recoverDraft(draft, signal);
+        const remaining = until - performance.now();
+        if (remaining <= 0 || !['prepared', 'sending', 'unknown'].includes(draft.status)) break;
+        const interval = draft.status === 'unknown' ? RECOVERY_INTERVAL : 200;
+        await pause(Math.min(remaining, interval), undefined, { signal: exec.signal });
       }
-      if (!draft.result) return { ok: true, status: draft.status, draftId, pending: true };
-      draft.receivedAt ||= new Date(now()).toISOString();
-      const { delivery, ...result } = draft.result;
-      return result;
+      return resultForAgent(draft);
     },
   };
   function close() {
