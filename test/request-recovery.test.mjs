@@ -175,3 +175,57 @@ test('the bundled CLI sends the approved ID once and a saved reply survives rest
   assert.equal((await reopened.resultTool.execute({ draftId: prepared.draftId }, exec)).errorCode, 'consult_result_unavailable');
   await assert.rejects(stat(localFile), { code: 'ENOENT' });
 });
+
+test('an automatic follow-up remains consumed after restoring the approved parent', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'zesia-dsh-automatic-followup-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let confirmBeforeSend = true;
+  let preflights = 0;
+  let sends = 0;
+  const start = () => {
+    const workflow = createConsultWorkflow({
+      openBrowser: false,
+      readConfiguration: async () => ({ url: 'https://api.zesia.dev', token, confirmBeforeSend }),
+      approvedRequests: createApprovedRequestStore({ directory }),
+      preflightRequest: async () => {
+        preflights++;
+        return { ok: true, modelCalls: 0 };
+      },
+      requestConsult: async () => {
+        sends++;
+        return {
+          format: 'zesia.consult.v0', consultId: 'automatic-test-' + sends, advice: 'Synthetic advice',
+          followUp: { requests: sends === 1 ? [{ id: 'collect', kind: 'evidence', question: 'What did the fixture observe?' }] : [] },
+          a2a: { messageId: 'synthetic-message-' + sends, contextId },
+        };
+      },
+    });
+    t.after(() => workflow.close());
+    return workflow;
+  };
+  const conversation = () => ({ agent: { session: {
+    id: 'automatic-followup-session', snapshotEvents: () => [{ type: 'user/message' }],
+  } } });
+  const original = start();
+  const exec = conversation();
+  const prepared = await original.tool.execute({ project: 'fixture', brief: 'Review a synthetic plan.', context: {} }, exec);
+  const window = await review(prepared);
+  assert.equal((await window.approve()).status, 202);
+  const parent = await original.waitTool.execute({ draftId: prepared.draftId, seconds: 2 }, exec);
+  const next = {
+    consultId: parent.consultation.consultId,
+    answers: [{ requestId: 'collect', text: 'Fixture evidence.', sourceRef: 'fixture-output' }],
+  };
+
+  confirmBeforeSend = false;
+  assert.equal((await original.followupTool.execute(next, exec)).ok, true);
+  assert.deepEqual([preflights, sends], [2, 2]);
+  original.close();
+
+  const restarted = start();
+  const restoredExec = conversation();
+  assert.equal((await restarted.resultTool.execute({ draftId: prepared.draftId }, restoredExec)).ok, true);
+  const duplicate = await restarted.followupTool.execute(next, restoredExec);
+  assert.equal(duplicate.errorCode, 'followup_unavailable');
+  assert.deepEqual([preflights, sends], [2, 2]);
+});

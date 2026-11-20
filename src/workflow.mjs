@@ -248,6 +248,10 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         return failed('local_approval_failed', 'Could not record this approval on the device. Nothing was sent by this attempt.');
       }
     }
+    if (!draft && continuation?.previousConsultId) {
+      try { await approvedRequests?.claimFollowup(sessionOf(exec).id, continuation.previousConsultId); }
+      catch { return failed('followup_unavailable', 'Could not reserve this follow-up. Check its existing result before continuing.'); }
+    }
     const transport = createTransportTool({
       onProgress, requestId: draft?.requestId,
       readConfiguration: async () => ({ ...config, url: destination, project: packet.project }),
@@ -344,7 +348,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       if(!session?.snapshotEvents)return failed('followup_unavailable','An active conversation is required.');
       try {
         if (typeof args?.consultId === 'string' && await approvedRequests?.hasFollowup(session.id, args.consultId)) {
-          return failed('followup_unavailable', 'This response already has an approved follow-up. Check its original result.');
+          return failed('followup_unavailable', 'This response already has a follow-up attempt. Check its original result.');
         }
         const continuation=continuations.prepare(session,args);
         const packet=continuation.packet;

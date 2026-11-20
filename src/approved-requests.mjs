@@ -1,9 +1,12 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const DRAFT_ID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+const FOLLOWUP_ID = /^followup-[0-9a-f]{64}$/;
+const followupId = (sessionId, consultId) =>
+  'followup-' + createHash('sha256').update(JSON.stringify([sessionId, consultId])).digest('hex');
 export const REVIEW_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function createApprovedRequestStore({
@@ -13,7 +16,7 @@ export function createApprovedRequestStore({
   const path = id => join(directory, id + '.json');
 
   async function read(id) {
-    if (typeof id !== 'string' || !DRAFT_ID.test(id)) return null;
+    if (typeof id !== 'string' || !(DRAFT_ID.test(id) || FOLLOWUP_ID.test(id))) return null;
     let record;
     try { record = JSON.parse(await readFile(path(id), 'utf8')); }
     catch (error) {
@@ -55,12 +58,19 @@ export function createApprovedRequestStore({
     }
   }
 
+  async function claimFollowup(sessionId, consultId) {
+    await store({ id: followupId(sessionId, consultId), approvedAt: now() }, true);
+  }
+
   return {
     async claim(record) {
+      if (record.previousConsultId) await claimFollowup(record.sessionId, record.previousConsultId);
       await store(record, true);
     },
+    claimFollowup,
     save(record) { return store(record, false); },
     async get(id, sessionId) {
+      if (!DRAFT_ID.test(id)) return null;
       const record = await read(id);
       return record?.sessionId === sessionId ? record : null;
     },
@@ -72,6 +82,7 @@ export function createApprovedRequestStore({
       return latest;
     },
     async hasFollowup(sessionId, consultId) {
+      if (await read(followupId(sessionId, consultId))) return true;
       for await (const record of scan()) {
         if (record.sessionId === sessionId && record.previousConsultId === consultId) return true;
       }
