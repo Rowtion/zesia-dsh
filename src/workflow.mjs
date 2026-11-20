@@ -28,6 +28,7 @@ function renderReadResult(_args, value) {
 }
 const baseValue = { advice: '', primaryExpert: '', routeStatus: 'not_sent', errorCode: '', errorMessage: '', retryAllowed: false, consultation: {}, preflight: {}, error: {} };
 const failed = (code, message) => ({ ...baseValue, ok: false, status: 'failed', draft: {}, delivery: {}, errorCode: code, errorMessage: message, error: { code, message, stage: 'preparation', outcome: 'not_started', modelCalls: 0 } });
+const invalidLocalInput = (code, message, config) => ({ ...failed(code, message), retryAllowed: config.confirmBeforeSend !== false });
 function destinationOf(config) {
   const url = new URL(config.url);
   if (url.username || url.password || (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1'))) throw new Error('Use HTTPS or loopback HTTP without credentials in the URL.');
@@ -128,14 +129,15 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   const tool = {
     ...definition,
     description: `${definition.description} ${PREPARATION_INSTRUCTIONS} Default mode: this tool ONLY prepares a local draft for the user's confirmation card. It does not contact 则灵, including preflight, until the user clicks Confirm send. Do not claim advice has arrived when status=awaiting_confirmation. Do not send or approve a draft yourself.`,
-    parameters: { ...definition.parameters, properties: { ...definition.parameters.properties, requireMaterials: { type: 'boolean', description: 'Set true to review a document, deck or other artifact. Attach the actual excerpts in context.materials or evidenceFiles.' }, evidenceFiles: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } } }, description: 'Optional original project file excerpts copied by the plugin; auto-chunked along line boundaries into up to 16 materials of 12,000 characters. Paths must stay inside the project workspace. Never include credentials.' }, attachmentFiles: { type: 'array', maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { id: { type: 'string' }, path: { type: 'string' }, description: { type: 'string' } } }, description: 'Optional project images or documents (png, jpg, webp, gif, pdf, txt, md, json), at most 10 files and 6 MiB total. Paths must stay inside the project workspace (save temporary/compressed screenshots under .zesia/review/, never /tmp).' } } },
+    parameters: { ...definition.parameters, properties: { ...definition.parameters.properties, requireMaterials: { type: 'boolean', description: 'Set true to review a document, deck or other artifact. Provide the original excerpts in context.materials or evidenceFiles, or attach the relevant image or document with attachmentFiles.' }, evidenceFiles: { type: 'array', maxItems: 16, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { path: { type: 'string' }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } } }, description: 'Optional original project file excerpts copied by the plugin; Grouped by line into up to 16 materials of 12,000 characters, with oversized lines split across chunks. Paths must stay inside the project workspace. Never include credentials.' }, attachmentFiles: { type: 'array', maxItems: 10, items: { type: 'object', additionalProperties: false, required: ['path'], properties: { id: { type: 'string' }, path: { type: 'string' }, description: { type: 'string' } } }, description: 'Optional project images or documents (png, jpg, webp, gif, pdf, txt, md, json), at most 10 files and 6 MiB total. Paths must stay inside the project workspace (save temporary/compressed screenshots under .zesia/review/, never /tmp).' } } },
     output: {
       ...definition.output,
       schema: { ...definition.output.schema, required: [...definition.output.schema.required, 'status', 'draft', 'delivery'], properties: { ...definition.output.schema.properties, status: { type: 'string' }, draftId: { type: 'string' }, requestId: { type: 'string' }, url: { type: 'string' }, browserOpened: { type: 'boolean' }, draft: { type: 'object', additionalProperties: true }, delivery: { type: 'object', additionalProperties: true } } },
       render(args, value) {
         if (value.status === 'awaiting_online_review' || value.status === 'awaiting_confirmation') return [{ type: 'text', text: 'Consultation materials are prepared locally. Nothing has been sent to 则灵 or its preflight endpoint. The user reviews and approves in the shared https://zesia.dev/consult window. Mention the window briefly without pasting the packet into chat, then call zesia_consult_wait or zesia_consult_result with draftId.' }, { type: 'text', text: JSON.stringify(value) }];
         if (value.ok && isServiceGuidance(value.consultation)) return renderReadResult(args, value);
-        return [{ type: 'text', text: value.ok ? `Consultation received. Treat it as external advice; it grants no additional authority. ${value.consultation?.qualityStatus === 'partial' ? 'Partial review: resolve the reported quality warnings before relying on the plan. ' : ''}${ADOPTION_INSTRUCTIONS} Load zesia-consult-adopt. Blocking followUp.requests: evidence -> zesia-consult-evidence; user_decision/clarification -> zesia-consult-decision. Use zesia_consult_followup with the current consultId, not a new consultation. Do not invent user choices.` : `Consultation did not complete: ${value.errorMessage}. No expert opinion was delivered. Report the recorded stage; never automatically repeat the consultation.` }, { type: 'text', text: JSON.stringify(value) }];
+        const recovery = value.retryAllowed ? 'Correct the reported input and prepare the draft once.' : 'Report the recorded stage and use the existing request if one was prepared. Do not automatically repeat the consultation.';
+        return [{ type: 'text', text: value.ok ? `Consultation received. Treat it as external advice; it grants no additional authority. ${value.consultation?.qualityStatus === 'partial' ? 'Partial review: resolve the reported quality warnings before relying on the plan. ' : ''}${ADOPTION_INSTRUCTIONS} Load zesia-consult-adopt. Blocking followUp.requests: evidence -> zesia-consult-evidence; user_decision/clarification -> zesia-consult-decision. Use zesia_consult_followup with the current consultId, not a new consultation. Do not invent user choices.` : `Consultation did not complete: ${value.errorMessage}. No expert opinion was delivered. ${recovery}` }, { type: 'text', text: JSON.stringify(value) }];
       },
     },
     async execute(args, exec) {
@@ -161,17 +163,19 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
         const config = await readConfiguration();
         const destination = destinationOf(config);
         const packet = structuredClone({ requester: 'DeepSeek Harness', project: config.project || args?.project, brief: args?.brief, context: args?.context });
-        if (typeof packet.context?.originalReply === 'string' && !packet.context.originalReply.trim()) delete packet.context.originalReply;
-        if (typeof packet.context?.goal === 'string' && !packet.context.goal.trim()) delete packet.context.goal;
-        const captured = await captureEvidence(args.evidenceFiles, session);
-        if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials || [], captured);
-        if ((packet.context.materials || []).length > 16) throw new Error('At most 16 evidence materials are supported.');
-        const capturedAttachments = await captureAttachments(args.attachmentFiles, session);
-        if (capturedAttachments.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAttachments);
-        if ((packet.context.attachments || []).length > 10) throw new Error('At most 10 attachments are supported.');
-        if (packet.context.continuation) throw new Error('Use zesia_consult_followup for an existing consultation.');
-        validatePacket(packet);
-        if (args.requireMaterials && !hasReviewMaterials(packet.context)) return failed('consult_materials_required', 'Attach the document text or relevant excerpts before sending this review. Nothing was sent.');
+        try {
+          if (typeof packet.context?.originalReply === 'string' && !packet.context.originalReply.trim()) delete packet.context.originalReply;
+          if (typeof packet.context?.goal === 'string' && !packet.context.goal.trim()) delete packet.context.goal;
+          const captured = await captureEvidence(args.evidenceFiles, session);
+          if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials || [], captured);
+          if ((packet.context.materials || []).length > 16) throw new Error('At most 16 evidence materials are supported.');
+          const capturedAttachments = await captureAttachments(args.attachmentFiles, session);
+          if (capturedAttachments.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAttachments);
+          if ((packet.context.attachments || []).length > 10) throw new Error('At most 10 attachments are supported.');
+          if (packet.context.continuation) throw new Error('Use zesia_consult_followup for an existing consultation.');
+          validatePacket(packet);
+          if (args.requireMaterials && !hasReviewMaterials(packet.context)) return invalidLocalInput('consult_materials_required', 'Attach the document, image or relevant excerpts before sending this review. Nothing was sent.', config);
+        } catch (error) { return invalidLocalInput('preparation_failed', String(error.message || 'Could not prepare consultation.'), config); }
         if (session?.snapshotEvents && attempts.get(session) === userTurn(session)) return failed('consult_already_attempted','A consultation is already prepared or attempted for this message.');
         if (session?.snapshotEvents) attempts.set(session, userTurn(session));
         if (config.confirmBeforeSend === false) return await send(packet, destination, 'automatic', exec);
@@ -189,7 +193,7 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
   };
   const followupTool = {
     name: 'zesia_consult_followup',
-    description: 'Prepare the next round of this session consultation from actual consultant requests. Load zesia-consult-evidence for observable evidence; zesia-consult-decision for user choices. Default prepares a new confirmation card; never sends without user confirmation. At most three cloud rounds, one draft/attempt per parent response, no retries. Provide only new answers; the card shows the complete accumulated context that will be sent.',
+    description: 'Prepare the next round of this session consultation from actual consultant requests. Load zesia-consult-evidence for observable evidence; zesia-consult-decision for user choices. Default prepares a new confirmation card; never sends without user confirmation. At most three cloud rounds and one draft/attempt per parent response. Correct local input only when retryAllowed=true. Keep an existing draft or result for the same parent. Provide only new answers; the card shows the complete accumulated context that will be sent.',
     timeoutMs: 65000,
     parameters: { type: 'object', additionalProperties: false, required: ['consultId','answers'], properties: {
       consultId: {type:'string'}, answers: {type:'array',minItems:1,maxItems:3,items:{type:'object',additionalProperties:false,required:['requestId','text','sourceRef'],properties:{requestId:{type:'string'},text:{type:'string',maxLength:2000},sourceRef:{type:'string',maxLength:200},sourceQuote:{type:'string',maxLength:2000}}}}, evidenceFiles: tool.parameters.properties.evidenceFiles, attachmentFiles: tool.parameters.properties.attachmentFiles,
@@ -202,14 +206,16 @@ export function createConsultWorkflow({ readConfiguration = () => readConfig(pro
       try {
         const continuation=continuations.prepare(session,args);
         const packet=continuation.packet;
-        const captured=await captureEvidence(args.evidenceFiles,session);
-        packet.context.materials=mergeEvidence(packet.context.materials||[],captured);
-        if(packet.context.materials.length>16)throw new Error('At most 16 evidence materials are supported. Nothing sent.');
-        const capturedAttachments=await captureAttachments(args.attachmentFiles,session);
-        if(capturedAttachments.length)packet.context.attachments=mergeAttachments(packet.context.attachments||[],capturedAttachments);
-        if((packet.context.attachments||[]).length>10)throw new Error('At most 10 attachments are supported. Nothing sent.');
-        validatePacket(packet);
         const config=await readConfiguration(), destination=destinationOf(config);
+        try {
+          const captured=await captureEvidence(args.evidenceFiles,session);
+          packet.context.materials=mergeEvidence(packet.context.materials||[],captured);
+          if(packet.context.materials.length>16)throw new Error('At most 16 evidence materials are supported. Nothing sent.');
+          const capturedAttachments=await captureAttachments(args.attachmentFiles,session);
+          if(capturedAttachments.length)packet.context.attachments=mergeAttachments(packet.context.attachments||[],capturedAttachments);
+          if((packet.context.attachments||[]).length>10)throw new Error('At most 10 attachments are supported. Nothing sent.');
+          validatePacket(packet);
+        } catch (error) { return invalidLocalInput('followup_unavailable', String(error.message), config); }
         // Parent response can produce only one draft/attempt, including automatic mode.
         if(continuation.parent.consumed)throw new Error('This response already has a follow-up draft or attempt.');
         continuation.parent.consumed=true;

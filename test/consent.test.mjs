@@ -8,7 +8,7 @@ import { createConsultWorkflow } from '../src/workflow.mjs';
 import { readConfig, saveConfirmationMode } from '../src/config.mjs';
 const args = { brief: 'Review the plan.', project: 'user-project', context: { goal: 'Choose a safe next step.', facts: ['User supplied fact.'], assumptions: ['Agent inference.'], constraints: ['No extra spending.'], originalReply: 'Previous answer.', attempts: [], userFeedback: [] } };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-function fixture() {
+function fixture({ unknownOutcome = false } = {}) {
   let config = { url: 'https://consult.example', token: 'test-secret' };
   let clock = 10000;
   let preflight = 0, paid = 0;
@@ -20,7 +20,7 @@ function fixture() {
     enableOnlineBridge: false,
     readConfiguration: async () => config, saveMode: async flag => { config = { ...config, confirmBeforeSend: flag }; return { confirmBeforeSend: flag }; }, now: () => clock,
     preflightRequest: async value => { preflight++; sent.push(structuredClone(value.input)); return { ok: true, modelCalls: 0 }; },
-    requestConsult: async value => { paid++; assert.deepEqual(value.input, sent.at(-1)); return { format: 'zesia.consult.v0', advice: 'Bounded advice.', usage: { totalTokens: 20 } }; },
+    requestConsult: async value => { paid++; assert.deepEqual(value.input, sent.at(-1)); if (unknownOutcome) throw new Error('Fixture lost the A2A response.'); return { format: 'zesia.consult.v0', advice: 'Bounded advice.', usage: { totalTokens: 20 } }; },
   });
   const send = (draft, packet = draft.packet, extra = {}) => workflow.control({ action: 'send', draftId: draft.id, draftHash: draft.hash, approvedHash: hash(packet), packet, ...extra }, exec);
   return { ...workflow, exec, events, send, counts: () => ({ preflight, paid }), sent, setConfig: value => { config = value; }, advance: () => { clock += 24 * 60 * 60 * 1000 + 1; } };
@@ -52,6 +52,46 @@ test('document evidence cannot silently disappear before confirmation or at send
   const result = await f.send(draft);
   assert.deepEqual(result.delivery.packet.context.materials, materials);
   assert.deepEqual(f.sent[0], draft.packet);
+  assert.deepEqual(f.counts(), { preflight: 1, paid: 1 });
+});
+test('attachment validation permits corrected local preparation before one exact approval', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'zesia-dsh-file-correction-'));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const f = fixture();
+  f.exec.agent.session.header = { cwd: workspace };
+  await writeFile(join(workspace, 'notes.txt'), 'A synthetic inspection note.');
+  await writeFile(join(workspace, 'unsupported.zip'), 'Fixture');
+  const input = { ...args, requireMaterials: true, attachmentFiles: [{ path: 'unsupported.zip' }] };
+  const invalid = await f.tool.execute(input, f.exec);
+  assert.equal(invalid.error.stage, 'preparation');
+  assert.equal(invalid.error.outcome, 'not_started');
+  assert.equal(invalid.retryAllowed, true);
+  assert.match(f.tool.output.render(input, invalid)[0].text, /correct the reported input/i);
+  assert.deepEqual(f.counts(), { preflight: 0, paid: 0 });
+
+  const fixed = { ...input, attachmentFiles: [{ path: 'notes.txt' }] };
+  const prepared = await f.tool.execute(fixed, f.exec);
+  assert.equal(prepared.status, 'awaiting_confirmation');
+  assert.equal(prepared.draft.packet.context.attachments[0].mediaType, 'text/plain');
+  assert.deepEqual(f.counts(), { preflight: 0, paid: 0 });
+  const duplicate = await f.tool.execute(fixed, f.exec);
+  assert.equal(duplicate.errorCode, 'consult_already_attempted');
+  assert.equal(duplicate.retryAllowed, false);
+
+  const sent = await f.send(prepared.draft);
+  assert.deepEqual(sent.delivery.packet, prepared.draft.packet);
+  assert.equal((await f.send(prepared.draft)).cached, true);
+  assert.deepEqual(f.counts(), { preflight: 1, paid: 1 });
+});
+test('a lost cloud response keeps the accepted draft and disables retry', async () => {
+  const f = fixture({ unknownOutcome: true });
+  const { draft } = await f.tool.execute(args, f.exec);
+  const result = await f.send(draft);
+  assert.equal(result.error.outcome, 'unknown');
+  assert.equal(result.retryAllowed, false);
+  assert.doesNotMatch(f.tool.output.render(args, result)[0].text, /correct the reported input/i);
+  assert.equal((await f.tool.execute(args, f.exec)).errorCode, 'consult_already_attempted');
+  assert.equal((await f.send(draft)).cached, true);
   assert.deepEqual(f.counts(), { preflight: 1, paid: 1 });
 });
 test('confirmation submits the edited packet exactly, and cached replay never sends again', async () => {
