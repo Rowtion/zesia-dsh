@@ -1,16 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { access, mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { saveConfig } from '@zesia/runtime/config';
 import { openOnlineBrowser, startOnlineReview } from '../node_modules/@zesia/runtime/review/online.mjs';
-import { defaultConfigPath, DEFAULT_SERVICE_URL, readConfig } from './config.mjs';
+import { defaultConfigPath, DEFAULT_SERVICE_URL, readConfig, saveBrowserActivation } from './config.mjs';
 
 // This bridge has no consultation, project, materials, send or cancel implementation.
 export function createOnboarding({ env = process.env, openBrowser = openOnlineBrowser } = {}) {
   const configPath = env.ZESIA_CONFIG || defaultConfigPath();
   const marker = configPath + '.onboarding-complete';
   const settings = () => readConfig(env, { requireToken: false });
-  let session, opening, connected = false, disposed = false, activating = false;
+  let session, opening, connected = false, disposed = false;
 
   async function seen() {
     try { await access(marker); return true; }
@@ -36,16 +35,11 @@ export function createOnboarding({ env = process.env, openBrowser = openOnlineBr
           packet: { requester: 'DeepSeek Harness' } };
       },
       async configure({ destination, token }) {
-        if (activating) throw new Error('Sign-in is already being saved.');
-        activating = true;
-        try {
-          const config = await settings();
-          if (config.token || config.url.replace(/\/$/u, '') !== DEFAULT_SERVICE_URL || destination !== DEFAULT_SERVICE_URL)
-            throw new Error('Existing credentials or service configuration were preserved.');
-          if (typeof token !== 'string' || !token || /[\s\x00-\x1f\x7f]/u.test(token))
-            throw new Error('A valid activation token is required.');
-          await saveConfig({ token, url: destination }, { ...env, ZESIA_CONFIG: configPath });
-        } finally { activating = false; }
+        const config = await settings();
+        if (config.url.replace(/\/$/u, '') !== DEFAULT_SERVICE_URL || destination !== DEFAULT_SERVICE_URL) {
+          throw new Error('Existing credentials or service configuration were preserved.');
+        }
+        await saveBrowserActivation({ destination, token }, env);
       },
     };
     session = await startOnlineReview({ draftId: id, runtime, onClose() { session = undefined; connected = false; } });
