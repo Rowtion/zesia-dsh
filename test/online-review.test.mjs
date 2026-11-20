@@ -66,6 +66,10 @@ for (const classification of [
         if (classification.deliveryKind === 'guidance') {
           assert.match(parts[0].text, /No expert review was completed/);
           assert.doesNotMatch(parts[0].text, /zesia_consult_feedback|zesia_consult_followup/);
+        } else if (tool === workflow.tool) {
+          assert.match(parts[0].text, /zesia_consult_feedback/);
+          assert.match(parts[0].text, /zesia-consult-evidence.*zesia-consult-decision.*zesia_consult_followup/);
+          assert.equal(parts[0].text.includes('Partial review:'), classification.deliveryKind === 'partial');
         }
         assert.equal(JSON.parse(parts.at(-1).text).consultation.consultId, 'dsh-online-1');
       }
