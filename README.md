@@ -33,6 +33,8 @@ The first time this version loads in DSH, the shared onboarding page at zesia.de
 
 A trial token is required for cloud consultation. Run `node <plugin-directory>/configure.mjs` in your terminal to configure it privately. Run the same command with `--show` for non-sensitive configuration status. Keep credentials out of chat and Git. Manage confirmation preferences in the host's plugin settings.
 
+The online review can authorize up to three rounds with its approved materials when both the site and host support that choice. The host can return verbatim evidence or an approved attachment to challenge a specific finding. Added files or answers open another review. The user can stop future sends from the review page and retain the available opinion. The originating agent records the latest verified and unresolved findings with `zesia_consult_finish` and reports them in the original conversation.
+
 The bundled preparation, evidence, decision and adoption Skills guide the original agent. Registration does not guarantee that a model follows every instruction. Follow-ups carry a reviewed context snapshot; unknown send outcomes are never retried automatically. Advice does not authorize additional execution.
 
 After approving a request, reopen its card in the original DSH conversation to check an unknown outcome. The card uses the same request ID even after a DSH restart. It reads from the original service with the original credential. The service's saved result may expire within 24 hours.

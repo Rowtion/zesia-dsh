@@ -9,7 +9,7 @@ export function consultationSuccess(consultation, preflight, trace) {
     retryAllowed: false, consultation, preflight, error: {},
   };
 }
-export function createTransportTool({ readConfiguration = readConfig, requestConsult = consultOverA2A, preflightRequest = preflightConsult, onProgress = () => {}, requestId } = {}) {
+export function createTransportTool({ readConfiguration = readConfig, requestConsult = consultOverA2A, preflightRequest = preflightConsult, onProgress = () => {}, requestId, beforeSend } = {}) {
   const failure = (code, message, error = {}, preflight = {}) => ({ ok: false, advice: '', primaryExpert: '', routeStatus: 'not_completed', errorCode: code, errorMessage: message, retryAllowed: false, consultation: {}, preflight, error: { code, message, retryAllowed: false, stage: 'preparation', outcome: 'not_started', modelCalls: null, ...error } });
   return {
     name: 'zesia_consult',
@@ -62,6 +62,9 @@ export function createTransportTool({ readConfiguration = readConfig, requestCon
           const issue = preflight.issues[0];
           const detailMsg = `${issue.field ? `[${issue.field}] ` : ''}${issue.message}${issue.hint ? ` ${issue.hint}` : ''}`;
           return { trace, ...failure(issue.code, detailMsg, { ...issue, stage: 'preflight', hint: issue.hint, modelCalls: 0, contentModified: false }, preflight) };
+        }
+        if (beforeSend && !await beforeSend()) {
+          return { ...failure('consult_discussion_stopped', 'The discussion ended before this round was sent.', { modelCalls: 0 }), trace };
         }
         progress('cloud_consultation');
         const result = await requestConsult({
